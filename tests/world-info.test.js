@@ -4,6 +4,18 @@ import { compileWorldInfo, conditionKeys, removeManagedEntries } from '../world-
 
 const match = (key, text) => new RegExp(key.slice(1, key.lastIndexOf('/')), key.slice(key.lastIndexOf('/') + 1)).test(text);
 const base = { id: '7', name: 'cup', enabled: true, content: 'yellow cup', dynamicState: { memoryCabinetElementId: 'cup' } };
+test('restricted entries fail closed without resolved avatars and append withholds secrets', () => {
+    const book = { entries: { 7: { ...base, constant: true, characterFilterMode: 'include', characterFilterIds: ['Alice.png'] } } };
+    assert.equal(compileWorldInfo(book).entries[7].disable, true);
+    const scope = { characters: [{ avatar: 'Alice.png' }], mode: 'swap' };
+    const allowed = compileWorldInfo(book, {}, scope).entries[7];
+    assert.equal(allowed.disable, false);
+    assert.deepEqual(allowed.characterFilter.names, ['Alice']);
+    assert.equal(compileWorldInfo(book, {}, { ...scope, mode: 'append' }).entries[7].disable, true);
+    assert.equal(compileWorldInfo(book, {}, { ...scope, mode: 'append_disabled' }).entries[7].disable, true);
+    book.entries[7].characterFilterIds = ['unknown'];
+    assert.equal(compileWorldInfo(book, {}, scope).entries[7].disable, true);
+});
 
 test('literal terms cannot become regexes or inject OR alternatives', () => {
     for (const term of ['/foo/i', 'a.*b', 'a|b', '[x]', '(cup)', '$1', 'x/y', 'a\\b', 'two\nlines']) {

@@ -38,6 +38,18 @@ export function parseImport(text) {
         throw new Error('지원하지 않는 버전이거나 기억 항목 형식이 올바르지 않습니다.');
     }
     if (data.elementMemory?.entities?.length > 400) throw new Error('요소 기억 400개 상한을 넘습니다. 분할 후 가져와 주세요.');
+    const scopeValid = row => row.knownBy === undefined || (Array.isArray(row.knownBy) && row.knownBy.every(id => typeof id === 'string' && id.trim()));
+    const episodeValid = row => record(row) && typeof row.title === 'string' && row.title.trim()
+        && (row.event === undefined || (record(row.event) && scopeValid(row.event)))
+        && (row.facts === undefined || (Array.isArray(row.facts) && row.facts.length <= 16 && row.facts.every(f => record(f) && scopeValid(f))));
+    const threadValid = row => record(row) && typeof row.title === 'string' && row.title.trim() && scopeValid(row)
+        && (row.history === undefined || (Array.isArray(row.history) && row.history.length <= 80 && row.history.every(h => record(h) && scopeValid(h))));
+    if (!data.items.every(scopeValid)
+        || (data.episodes !== undefined && (!Array.isArray(data.episodes) || data.episodes.length > 400 || !data.episodes.every(episodeValid)))
+        || (data.threads !== undefined && (!Array.isArray(data.threads) || data.threads.length > 400 || !data.threads.every(threadValid)))
+        || (data.branchHold != null && (!record(data.branchHold) || Object.entries(data.branchHold).some(([key, rows]) => ['items', 'entities', 'facts', 'docs', 'episodes', 'threads', 'threadEntries', 'scopeReviewHold'].includes(key) && (!Array.isArray(rows) || rows.length > 400 || rows.some(r => !record(r))))))) {
+        throw new Error('장면·흐름·인물 범위 또는 분기 보류 형식/상한이 올바르지 않습니다.');
+    }
     if (data.wiki?.docs?.length > 400 || data.wiki?.docs?.some(doc => doc.sections?.length > 16)) {
         throw new Error('지원 상한(문서 400개, 문서당 섹션 16개)을 넘습니다. 분할 후 가져와 주세요.');
     }

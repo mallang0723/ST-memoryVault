@@ -6,7 +6,7 @@
   "js": "index.js",
   "css": "extension.css",
   "author": "mallang0723",
-  "version": "2.0.0-st.1",
+  "version": "2.1.1-st.1",
   "homePage": "https://github.com/mallang0723/memoryVaultSilly",
   "minimum_client_version": "1.19.0"
 }

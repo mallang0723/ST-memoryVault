@@ -1,6 +1,31 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createHost, chatIdentity, chatSnapshot, HOST_KEY } from '../host.js';
+import { compileWorldInfo as oldCompile } from './fixtures/world-info-2.0.0.js';
+test('2.0.0 baseline reconstruction upgrades faithful old output and preserves edited or unreadable books', async () => {
+    for (const mode of ['clean', 'edited', 'unreadable']) {
+        const f = fixture({ worldInfo: { template: { customTemplateField: 'kept' } } });
+        const id = await seed(f);
+        const book = f.disk.get(id).extensions.memoryVault;
+        const old = oldCompile(book, { customTemplateField: 'kept' });
+        old.entries[99] = { uid: 99, content: 'manual entry' };
+        if (mode === 'edited') old.entries[0].content = 'manual edit';
+        if (mode === 'unreadable') old.extensions.memoryVault.entries = null;
+        f.disk.set(id, old);
+        const before = structuredClone(old);
+        await f.host.beginSync(f.id);
+        await f.host.api(`lorebooks/${id}`, { method: 'PATCH', body: { name: 'upgraded' } });
+        if (mode === 'clean') {
+            await f.host.commitSync(f.id);
+            assert.ok(f.disk.get(id).extensions.memoryVaultBaseline);
+            assert.equal(f.disk.get(id).entries[99].content, 'manual entry');
+            assert.ok(f.disk.get(id).entries[0].characterFilter);
+        } else {
+            await assert.rejects(f.host.commitSync(f.id), /충돌/);
+            assert.deepEqual(f.disk.get(id), before);
+        }
+    }
+});
 
 class Events {
     listeners = new Map();
@@ -9,7 +34,7 @@ class Events {
     async emit(type, ...args) { for (const fn of this.listeners.get(type) || []) await fn(...args); }
 }
 
-function fixture() {
+function fixture(options = {}) {
     const disk = new Map();
     const calls = [];
     const ctx = {
@@ -24,7 +49,7 @@ function fixture() {
         async generateRaw(params) { calls.push(params); return '{"items":[]}'; },
     };
     let failWorld = false;
-    const host = createHost({ getContext: () => ctx, fetchImpl: async (path, options) => {
+    const host = createHost({ ...options, getContext: () => ctx, fetchImpl: async (path, options) => {
         const body = JSON.parse(options.body);
         calls.push({ path, body, headers: options.headers });
         if (path === '/api/worldinfo/edit') {
@@ -39,6 +64,26 @@ function fixture() {
     const id = chatIdentity(ctx);
     return { ctx, host, id, disk, calls, failWorld: () => { failWorld = true; } };
 }
+test('LAN metadata and branch boundary use supplied hash', async () => {
+    const original = globalThis.crypto;
+    Object.defineProperty(globalThis, 'crypto', { configurable: true, value: {} });
+    try {
+        const f = fixture({ hashString: async text => (await import('node:crypto')).createHash('sha256').update(text).digest('hex') });
+        await seed(f);
+        const first = f.ctx.chatMetadata[HOST_KEY].sourceBoundary.hash;
+        await f.host.api(`chats/${encodeURIComponent(f.id)}/metadata`, { method: 'PATCH', body: {} });
+        assert.equal(f.ctx.chatMetadata[HOST_KEY].sourceBoundary.hash, first);
+    } finally { Object.defineProperty(globalThis, 'crypto', { configurable: true, value: original }); }
+});
+test('all persisted WI fields detect conflicts and extensions survive', async () => {
+    for (const field of ['disable', 'characterFilter', 'position', 'probability']) {
+        const f = fixture(); const id = await seed(f);
+        f.disk.get(id).entries[0][field] = field === 'characterFilter' ? { names: ['other'] } : 27;
+        await f.host.beginSync(f.id);
+        await f.host.api(`lorebooks/${id}`, { method: 'PATCH', body: { name: 'changed' } });
+        await assert.rejects(f.host.commitSync(f.id), /충돌/);
+    }
+});
 
 async function seed(f) {
     await f.host.beginSync(f.id);
@@ -53,6 +98,42 @@ async function seed(f) {
     } });
     return book.id;
 }
+test('avatar identity and summary source exclusion', async () => {
+    const f = fixture();
+    f.ctx.chat.push({ is_system: true, mes: 'hidden', extra: { memory: 'secret' } });
+    f.ctx.chat.push({ mes: 'conditional', extra: { memory: '{{#if char == "a"}}secret{{/if}}' } });
+    const view = chatSnapshot(f.ctx);
+    assert.deepEqual(view.characterIds, ['Alice.png']);
+    assert.equal(view.metadata.summaryEntries.length, 1);
+    assert.equal((await f.host.api('characters/Alice.png')).id, 'Alice.png');
+});
+test('branch cutoff requires a matching saved message boundary', async () => {
+    const f = fixture();
+    f.ctx.chat[0].send_date = '2026-10-14T01:00:00Z';
+    await seed(f);
+    f.ctx.chatMetadata.main_chat = 'story';
+    f.ctx.chatMetadata.integrity = 'child';
+    f.ctx.chatId = 'branch';
+    const id = chatIdentity(f.ctx);
+    assert.equal((await f.host.getBranchCutPoint(id)).at, '2026-10-14T01:00:00.000Z');
+    f.ctx.chat.push({ mes: 'new after branch', send_date: '2026-10-15T00:00:00Z' });
+    assert.equal(await f.host.getBranchCutPoint(id), null);
+});
+test('sync preserves external WI and rejects edits to generated entries', async () => {
+    const f = fixture();
+    const id = await seed(f);
+    f.disk.get(id).entries[99] = { uid: 99, content: 'external' };
+    await f.host.beginSync(f.id);
+    await f.host.api(`lorebooks/${id}`, { method: 'PATCH', body: { name: 'changed' } });
+    await f.host.commitSync(f.id);
+    f.host.endSync();
+    assert.equal(f.disk.get(id).entries[99].content, 'external');
+    f.disk.get(id).entries[0].content = 'manual edit';
+    await f.host.beginSync(f.id);
+    await f.host.api(`lorebooks/${id}`, { method: 'PATCH', body: { name: 'again' } });
+    await assert.rejects(f.host.commitSync(f.id), /충돌/);
+    f.host.endSync();
+});
 
 test('chat identity scopes character/group and survives rename using integrity', () => {
     const { ctx, id } = fixture();

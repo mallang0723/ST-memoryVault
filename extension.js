@@ -5,7 +5,8 @@ import { parseImport, exportData, downloadJson, MAX_IMPORT_BYTES } from './migra
 export function mountMemoryVault(host) {
   "use strict";
 
-  const VERSION = "2.0.0-st.1";
+  const VERSION = "2.1.1-st.1";
+  const AM_SCENE_SOURCE = "unsupported-advanced-memory-scene";
   const DATA_KEY = "memoryCabinetV1";
   const LEGACY_PROMISE_KEY = "promiseKeeperV1";
     const EXT_STORAGE_KEY = "memoryCabinetUiV1";
@@ -17,6 +18,8 @@ export function mountMemoryVault(host) {
   const ELEMENT_FACT_ENTRY_TAG = "memory-cabinet-element-facts";
   const ELEMENT_TRIGGER_ENTRY_TAG = "memory-cabinet-element-trigger";
   const BACKUP_ENTRY_TAG = "memory-cabinet-structured-backup";
+  // v2.1: 일부 인물만 아는 약속·앵커는 공용 블록에 넣지 않고 인물 필터가 걸린 항목으로 따로 넣는다.
+  const RESTRICTED_ENTRY_TAG = "memory-cabinet-restricted";
   const BOOK_MARKER = "§MEMORY_CABINET_RP_V1§";
   const PROMISE_MARKER = "§MEMORY_CABINET_PROMISES_V1§";
   const ANCHOR_MARKER = "§MEMORY_CABINET_ANCHORS_V1§";
@@ -24,6 +27,7 @@ export function mountMemoryVault(host) {
   const ELEMENT_MARKER = "§MEMORY_CABINET_ELEMENT_V1§";
   const ELEMENT_TRIGGER_MARKER = "§MEMORY_CABINET_ELEMENT_TRIGGER_V1§";
   const BACKUP_MARKER = "§MEMORY_CABINET_BACKUP_V1§";
+  const RESTRICTED_MARKER = "§MEMORY_CABINET_RESTRICTED_V1§";
   const WIKI_HEADER_ENTRY_TAG = "memory-cabinet-wiki-header";
   const WIKI_ALWAYS_ENTRY_TAG = "memory-cabinet-wiki-always";
   const WIKI_DOC_ENTRY_TAG = "memory-cabinet-wiki-doc";
@@ -47,7 +51,7 @@ export function mountMemoryVault(host) {
     { id: "sillytavern", label: "SillyTavern 테마 따르기", help: "호스트 색에서 계산 · 밝음/어두움 자동" },
   ];
   const UI_THEME_IDS = UI_THEMES.map((row) => row.id);
-  const TAB_IDS = ["overview", "promise", "anchor", "element", "wiki"];
+  const TAB_IDS = ["overview", "promise", "thread", "anchor", "episode", "element", "wiki"];
   const WIKI_SECTION_LIMIT = 16;
   const WIKI_CANDIDATE_LIMIT = 8;
   const WIKI_CATEGORY_LABEL = {
@@ -127,6 +131,15 @@ When current and historical facts differ, current facts take precedence.`;
     "- Example: hospital, surgery, 병원, 수술.",
     "- Do not add forced translations for a Korean-language source, and do not alter user-authored manual keywords.",
   ].join("\n");
+  // v2.1: 누가 아는가. 고급 메모리 장면의 인물 범위와 {{#if char}} 구간을 후보까지 보존한다.
+  const SCOPE_CONTRACT = [
+    "Knowledge-scope rule (fixed by the extension, do not override):",
+    "- Source text may contain [KNOWN ONLY BY: names] ... [/KNOWN ONLY BY] sections or a [SCENE AUDIENCE ...] line. Those facts are known only to the listed characters.",
+    "- For every record, return knownBy: an array of the exact character names who know it, or [\"all\"] when every character in the roleplay knows it.",
+    "- Never merge a restricted fact into a record known by more characters. Keep restricted facts in their own records.",
+    "- Mere presence or being mentioned does not grant knowledge of private thoughts, secrets or off-screen events.",
+    "- An existing record marked knownBy keeps that restriction unless the source clearly shows the others learned it.",
+  ].join("\n");
   const ADVANCED_MEMORY_PRIORITY_RULE = "When these current facts conflict with an older scene or summary recalled by Advanced Memory, treat these current facts as the latest authoritative state.";
 
   const DEFAULT_REVIEW_PROMPT = [
@@ -186,6 +199,8 @@ When current and historical facts differ, current facts take precedence.`;
     more: iconSvg('<circle cx="6" cy="12" r=".8"/><circle cx="12" cy="12" r=".8"/><circle cx="18" cy="12" r=".8"/>', 2.4),
     eye: iconSvg('<path d="M2.5 12S6 5.5 12 5.5 21.5 12 21.5 12 18 18.5 12 18.5 2.5 12 2.5 12Z"/><circle cx="12" cy="12" r="2.8"/>'),
     warn: iconSvg('<path d="M12 4l9 16H3L12 4Z"/><path d="M12 10v4.5"/><path d="M12 17.5h.01"/>', 1.9),
+    flow: iconSvg('<circle cx="6" cy="6.5" r="2"/><circle cx="18" cy="12" r="2"/><circle cx="6" cy="17.5" r="2"/><path d="M8 6.5h3.5a3 3 0 0 1 3 3V12M8 17.5h3.5a3 3 0 0 0 3-3V12h1.5"/>'),
+    scene: iconSvg('<rect x="3.5" y="5.5" width="17" height="13" rx="2"/><path d="M3.5 9.5h17"/><path d="M7.5 5.5l2 4M12 5.5l2 4M16.5 5.5l2 4"/><path d="M8 13.5h8M8 16h5"/>'),
     search: iconSvg('<circle cx="11" cy="11" r="6.5"/><path d="M16 16l4.5 4.5"/>', 1.9),
   };
 
@@ -219,7 +234,13 @@ When current and historical facts differ, current facts take precedence.`;
     wikiProposalSelected: new Set(),
     wikiHistory: [],
     koDisplay: "auto",
-    agentNotice: { checked: false, memoryNag: "unknown", longTermMemory: "unknown" },
+    agentNotice: { checked: false, memoryNag: "unknown", longTermMemory: "unknown", lorebookKeeper: "unknown", keeperTargetLorebookId: "" },
+    chatCharacters: [],
+    amSceneRows: [],
+    amSceneError: "",
+    sceneSettings: null,
+    pendingAmRows: [],
+    amChatId: "",
     agentNoticeDismissed: {},
     elementExtractTurns: 20,
     elementRangeStart: 1,
@@ -263,6 +284,26 @@ When current and historical facts differ, current facts take precedence.`;
     busyStartedAt: 0,
     busyTimer: null,
     syncing: false,
+    syncAgain: false,
+    hiddenSkipped: {},
+    reviewEpisodes: [],
+    reviewEpisodeSelected: new Set(),
+    candEpisodes: [],
+    candEpisodeSelected: new Set(),
+    candBatch: null,
+    episodeDraft: null,
+    episodeDraftExtraFacts: 0,
+    reviewThreads: [],
+    reviewThreadSelected: new Set(),
+    candThreads: [],
+    candThreadSelected: new Set(),
+    threadDraft: null,
+    branchSplitBusy: false,
+    amAllFingerprints: null,
+    staleRecords: [],
+    sourceWatchByChat: {},
+    syncPromise: null,
+    actionLock: false,
   };
 
   const cleanupFns = [];
@@ -307,6 +348,8 @@ When current and historical facts differ, current facts take precedence.`;
     const mode = chatMode(chat);
     return ["roleplay", "role_play", "rp", "visual_novel", "visual-novel", "vn"].includes(mode);
   }
+  // Marinara가 지금 화면에 연 채팅. 보관함을 열 때만 참고하고, 보관함 안에서 고른 이야기는 그대로 둔다.
+  function hostActiveChatId() { return String(host.getCurrentChatId() || ""); }
   function chatLabel(chat) { return String(chat?.name || chat?.title || chat?.displayName || "이름 없는 RP"); }
   function chatSelectLabel(chat) {
     const name = chatLabel(chat);
@@ -357,7 +400,38 @@ When current and historical facts differ, current facts take precedence.`;
     return rows.slice().sort((a, b) => String(a.createdAt || a.updatedAt || "").localeCompare(String(b.createdAt || b.updatedAt || "")));
   }
 
+  // v2.1 근거 지문. 요약은 id별 내용 해시, 장면은 고급 메모리 지문, 메시지는 (역할·스와이프·시각·내용) 지문.
+  // 장면·메시지는 id가 아니라 지문 값으로 비교한다. 분기에서 id가 바뀌어도 같은 원문이면 같은 근거로 본다.
+  function messageSourceFingerprint(row) {
+    return textHash(`${String(row?.role || "")}|${Number(row?.activeSwipeIndex) || 0}|${String(row?.createdAt || "")}|${String(row?.content || "")}`);
+  }
+  function sourceFingerprintsForRows(rows, mode = "summaries") {
+    const out = {};
+    for (const row of safeArray(rows)) {
+      if (!isRecord(row)) continue;
+      if (row.sourceKind === AM_SCENE_SOURCE) { if (row.sourceFingerprint) out[`am:${row.amRecordId}`] = String(row.sourceFingerprint); continue; }
+      const id = String(row.id || "");
+      if (!id || id === "legacy-summary") continue;
+      if (mode === "messages") out[`message:${id}`] = messageSourceFingerprint(row);
+      else out[`summary:${id}`] = textHash(row.content || "");
+    }
+    return out;
+  }
+
+  function summaryRowText(row) {
+    if (row?.sourceKind === AM_SCENE_SOURCE) {
+      const audience = sourceRowAudience(row);
+      const head = [`[장면 요약 · ${row.title || "장면"}${row.timeline ? ` · ${row.timeline}` : ""}${row.startIndex ? ` · #${row.startIndex}–${row.endIndex}` : ""}]`];
+      if (audience.audienceIds.length) head.push(`[SCENE AUDIENCE — ONLY THESE CHARACTERS KNOW THIS SCENE: ${audience.audienceIds.map(characterName).join(", ")}]`);
+      return `${head.join("\n")}\n${labelCharacterConditions(row.content)}`;
+    }
+    const content = String(row?.content || "");
+    return `[${row?.title || "요약"}]\n${hasCharacterConditions(content) ? labelCharacterConditions(content) : content}`;
+  }
+
   function summarySignature(row) {
+    // 고급 메모리 장면은 id + sourceFingerprint로 새 장면/바뀐 장면을 가른다.
+    if (row?.sourceKind === AM_SCENE_SOURCE) return `am:${String(row.amRecordId || "")}|${String(row.sourceFingerprint || "")}`;
     return `${String(row?.id || "summary")}|${String(row?.updatedAt || row?.createdAt || "")}|${textHash(row?.content || "")}`;
   }
 
@@ -366,7 +440,7 @@ When current and historical facts differ, current facts take precedence.`;
   }
 
   function hasUnsavedCandidateLayer() {
-    if (state.layer === "candidates") return state.candidates.length > 0;
+    if (state.layer === "candidates") return state.candidates.length > 0 || state.candEpisodes.length > 0 || state.candThreads.length > 0;
     if (state.layer === "review-candidates") return state.reviewSourceRows.length > 0;
     if (state.layer === "health-candidates") return state.healthCandidates.length > 0;
     if (state.layer === "element-candidates") return state.elementCandidates.length > 0;
@@ -387,7 +461,9 @@ When current and historical facts differ, current facts take precedence.`;
   }
 
   function clearLayerDrafts(layer = state.layer) {
-    if (layer === "candidates") { state.candidates = []; state.candidateSelected.clear(); }
+    if (layer === "candidates") { state.candidates = []; state.candidateSelected.clear(); state.candEpisodes = []; state.candEpisodeSelected = new Set(); state.candThreads = []; state.candThreadSelected = new Set(); state.candBatch = null; }
+    if (layer === "episode-editor") { state.episodeDraft = null; state.episodeDraftExtraFacts = 0; }
+    if (layer === "thread-editor") state.threadDraft = null;
     if (layer === "review-candidates") return;
     if (layer === "health-candidates") { state.healthCandidates = []; state.healthSelected.clear(); }
     if (layer === "element-candidates") { state.elementCandidates = []; state.elementCandidateSelected.clear(); state.elementExtractInfo = null; state.elementCandidateOverflow = 0; }
@@ -412,6 +488,48 @@ When current and historical facts differ, current facts take precedence.`;
     return true;
   }
 
+  // 선택 개수는 약속·앵커와 장면 기억·진행 흐름을 함께 센다.
+  function selectionTotals(kind) {
+    if (kind === "review") return { selected: state.reviewSelected.size + state.reviewEpisodeSelected.size + state.reviewThreadSelected.size, total: state.reviewCandidates.filter((item) => item.action !== "keep").length + state.reviewEpisodes.length + state.reviewThreads.length };
+    if (kind === "health") return { selected: state.healthSelected.size, total: state.healthCandidates.filter((item) => item.action !== "keep").length };
+    return { selected: state.candidateSelected.size + state.candEpisodeSelected.size + state.candThreadSelected.size, total: state.candidates.length + state.candEpisodes.length + state.candThreads.length };
+  }
+  function selectionCountText(kind) {
+    const { selected, total } = selectionTotals(kind);
+    return `선택됨 ${selected}/${total}개`;
+  }
+  function reviewItemConflict(item) {
+    const existing = item?.targetId ? safeArray(state.currentData?.items).find((row) => row.id === item.targetId) : null;
+    return !!(existing && item.baseUpdatedAt && existing.updatedAt !== item.baseUpdatedAt);
+  }
+  // 전체 선택은 처음 자동 선택과 같은 기준을 쓴다. 충돌·공개 범위 확인·중복 의심·다시 열기 확인·적용 불가 후보는 직접 골라야 한다.
+  function selectAllSafe(kind) {
+    if (kind === "review") {
+      state.reviewSelected = new Set(state.reviewCandidates.map((item, i) => (item.action === "keep" || reviewItemConflict(item) || scopeBlocksApply(item) || item.duplicateOf ? null : String(i))).filter(Boolean));
+      state.reviewEpisodeSelected = preselectEpisodes(state.reviewEpisodes);
+      state.reviewThreadSelected = preselectThreads(state.reviewThreads);
+    } else if (kind === "candidate") {
+      state.candidateSelected = new Set(state.candidates.map((item, i) => (scopeBlocksApply(item) || item.duplicateOf ? null : String(i))).filter(Boolean));
+      state.candEpisodeSelected = preselectEpisodes(state.candEpisodes);
+      state.candThreadSelected = preselectThreads(state.candThreads);
+    } else if (kind === "health") {
+      state.healthSelected = new Set(state.healthCandidates.map((item, i) => (item.action === "keep" || reviewItemConflict(item) ? null : String(i))).filter(Boolean));
+    }
+    const { selected, total } = selectionTotals(kind);
+    return { selected, skipped: Math.max(0, total - selected) };
+  }
+  // 선택만 푼다. 후보 목록·검토 대기·검토 완료 표시는 건드리지 않는다.
+  function clearSelection(kind) {
+    if (kind === "review") { state.reviewSelected = new Set(); state.reviewEpisodeSelected = new Set(); state.reviewThreadSelected = new Set(); }
+    else if (kind === "candidate") { state.candidateSelected = new Set(); state.candEpisodeSelected = new Set(); state.candThreadSelected = new Set(); }
+    else if (kind === "health") state.healthSelected = new Set();
+  }
+  function bulkToolbar(kind, note) {
+    const clearLabel = kind === "review" ? "전체 보류" : "전체 해제";
+    const clearTitle = kind === "review" ? "선택만 풀어요. 후보는 지우지 않고 승인 대기에 그대로 남아요." : "선택만 풀어요. 후보는 그대로 남아요.";
+    return `<div class="mmc-candidate-toolbar mmc-bulk-toolbar"><div class="mmc-bulk-count"><b data-selected-count="${kind}">${selectionCountText(kind)}</b><small>${note}</small></div><div class="mmc-bulk-actions"><button type="button" class="mmc-btn mmc-sm" data-action="bulk-select" data-bulk="${kind}" title="충돌·공개 범위 확인·중복 의심 후보는 빼고 고릅니다">전체 선택</button><button type="button" class="mmc-btn mmc-sm" data-action="bulk-clear" data-bulk="${kind}" title="${clearTitle}">${clearLabel}</button></div></div>`;
+  }
+
   function updateCandidateSelectionDom(kind, input) {
     const row = input?.closest?.(".mmc-candidate");
     const list = row?.closest?.(".mmc-candidate-list");
@@ -424,15 +542,15 @@ When current and historical facts differ, current facts take precedence.`;
       const lastSelected = selectedRows[selectedRows.length - 1];
       if (lastSelected) lastSelected.after(row); else list.append(row);
     }
-    const set = kind === "review" ? state.reviewSelected : kind === "health" ? state.healthSelected : state.candidateSelected;
+    const { selected } = selectionTotals(kind);
     const buttonSelector = kind === "review" ? '[data-action="apply-review"]' : kind === "health" ? '[data-action="apply-health"]' : '[data-action="save-candidates"]';
     const button = document.querySelector(buttonSelector);
     if (button) {
-      button.disabled = set.size <= 0;
-      button.textContent = kind === "candidate" ? `선택 ${set.size}개 추가` : `선택 ${set.size}개 적용`;
+      button.disabled = selected <= 0;
+      button.textContent = kind === "candidate" ? `선택 ${selected}개 추가` : `선택 ${selected}개 적용`;
     }
     const count = document.querySelector(`[data-selected-count="${kind}"]`);
-    if (count) count.textContent = `선택됨 ${set.size}개`;
+    if (count) count.textContent = selectionCountText(kind);
   }
 
   async function api(path, options = {}) {
@@ -489,6 +607,34 @@ When current and historical facts differ, current facts take precedence.`;
     };
   }
 
+  // v2.1 선택 필드. knownBy가 비어 있으면 지금까지처럼 모두가 아는 기억이다.
+  function normalizeKnownBy(value) {
+    const out = [];
+    for (const raw of safeArray(value)) {
+      const id = String(raw || "").trim().slice(0, 120);
+      if (id && !out.includes(id)) out.push(id);
+      if (out.length >= 24) break;
+    }
+    return out;
+  }
+  function normalizeSourceFingerprints(value) {
+    const raw = parseRecord(value);
+    const out = {};
+    for (const [key, fp] of Object.entries(raw).slice(0, 48)) {
+      const k = String(key || "").slice(0, 160);
+      const v = String(fp || "").slice(0, 200);
+      if (k && v) out[k] = v;
+    }
+    return out;
+  }
+  function optionalScopeFields(item) {
+    const knownBy = normalizeKnownBy(item.knownBy);
+    const fps = normalizeSourceFingerprints(item.sourceFingerprints);
+    const candidateId = String(item.sourceCandidateId || "").slice(0, 120);
+    return { ...(knownBy.length ? { knownBy } : {}), ...(Object.keys(fps).length ? { sourceFingerprints: fps } : {}), ...(candidateId ? { sourceCandidateId: candidateId } : {}) };
+  }
+  function isRestrictedItem(item) { return normalizeKnownBy(item?.knownBy).length > 0; }
+
   function normalizePromise(item = {}) {
     return {
       id: String(item.id || uid("promise")),
@@ -505,6 +651,7 @@ When current and historical facts differ, current facts take precedence.`;
       sourceQuote: String(item.sourceQuote || item.quote || ""),
       createdAt: String(item.createdAt || nowIso()),
       updatedAt: String(item.updatedAt || item.createdAt || nowIso()),
+      ...optionalScopeFields(item),
     };
   }
 
@@ -529,6 +676,7 @@ When current and historical facts differ, current facts take precedence.`;
       sourceQuote: String(item.sourceQuote || ""),
       createdAt: String(item.createdAt || nowIso()),
       updatedAt: String(item.updatedAt || item.createdAt || nowIso()),
+      ...optionalScopeFields(item),
     };
   }
 
@@ -786,9 +934,22 @@ When current and historical facts differ, current facts take precedence.`;
       id: String(row.id || ""), title: String(row.title || ""), content: String(row.content || ""),
       origin: String(row.origin || ""), enabled: row.enabled !== false,
       createdAt: String(row.createdAt || ""), updatedAt: String(row.updatedAt || ""), messageCount: Number(row.messageCount) || 0,
+      ...(row.sourceKind === AM_SCENE_SOURCE ? {
+        sourceKind: AM_SCENE_SOURCE,
+        amRecordId: String(row.amRecordId || ""),
+        sourceFingerprint: String(row.sourceFingerprint || ""),
+        audienceCharacterIds: normalizeKnownBy(row.audienceCharacterIds),
+        timeline: String(row.timeline || ""),
+        startIndex: Number(row.startIndex) || 0,
+        endIndex: Number(row.endIndex) || 0,
+      } : {}),
     }));
-    if (!candidates.length && !sourceRows.length) return null;
+    const episodes = safeArray(raw.episodes).filter(isRecord).map((row) => ({ ...row }));
+    const threads = safeArray(raw.threads).filter(isRecord).map((row) => ({ ...row }));
+    if (!candidates.length && !sourceRows.length && !episodes.length && !threads.length) return null;
     return {
+      ...(threads.length ? { threads, selectedThreadIds: safeArray(raw.selectedThreadIds).map(String) } : {}),
+      ...(episodes.length ? { episodes, selectedEpisodeIds: safeArray(raw.selectedEpisodeIds).map(String) } : {}),
       candidates,
       selectedIndices: safeArray(raw.selectedIndices).map(String),
       selectedCandidateIds: safeArray(raw.selectedCandidateIds).map(String),
@@ -802,13 +963,78 @@ When current and historical facts differ, current facts take precedence.`;
     const raw = parseRecord(value);
     const updated = safeArray(raw.updated).filter(isRecord).filter((row) => row.before?.id).map((row) => ({ id: String(row.id), before: normalizeItem(row.before), appliedUpdatedAt: String(row.appliedUpdatedAt || "") }));
     const created = safeArray(raw.created).filter(isRecord).map((row) => ({ id: String(row.id || ""), appliedUpdatedAt: String(row.appliedUpdatedAt || "") })).filter((row) => row.id);
-    if (!updated.length && !created.length) return null;
-    return { createdAt: String(raw.createdAt || nowIso()), sourceBatchKey: String(raw.sourceBatchKey || ""), updated, created };
+    const episodes = safeArray(raw.episodes).map(String).filter(Boolean);
+    const threadCands = safeArray(raw.threadCandidates).map(String).filter(Boolean);
+    if (!updated.length && !created.length && !episodes.length && !threadCands.length) return null;
+    return { createdAt: String(raw.createdAt || nowIso()), sourceBatchKey: String(raw.sourceBatchKey || ""), updated, created, ...(episodes.length ? { episodes } : {}), ...(threadCands.length ? { threadCandidates: threadCands, threadVersions: parseRecord(raw.threadVersions) } : {}) };
   }
 
+  function scopeRecords(value) {
+    if (!value || typeof value !== "object") return [];
+    return [...(Object.hasOwn(value, "knownBy") && (!Array.isArray(value.knownBy) || value.knownBy.length) ? [value] : []), ...Object.values(value).flatMap(scopeRecords)];
+  }
+  function quarantineScopes(raw, importing = false) {
+    const value = structuredClone(parseRecord(raw));
+    const held = safeArray(value.scopeReviewHold);
+    const collect = (container, key, kind, unsupported) => {
+      if (!container) return;
+      container[key] = safeArray(container[key]).filter(record => {
+        const scopes = scopeRecords(record);
+        const supportedParts = kind === "items" ? [record] : kind === "episodes" ? [record.event, ...safeArray(record.facts)] : kind === "threads" ? [record, ...safeArray(record.history)] : [];
+        const unsupportedScope = unsupported || scopes.some(part => !supportedParts.includes(part));
+        const unknown = scopes.some(row => !Array.isArray(row.knownBy) || row.knownBy.some(id => !state.chatCharacters.some(c => c.id === id)));
+        if (!scopes.length || !(importing || unsupportedScope || unknown)) return true;
+        held.push({ kind, record, unsupported: unsupportedScope, scopeReviewPending: true });
+        return false;
+      });
+    };
+    collect(value, "items", "items", false);
+    collect(value, "episodes", "episodes", false);
+    collect(value, "threads", "threads", false);
+    collect(value.elementMemory, "entities", "entities", true);
+    collect(value.wiki, "docs", "docs", true);
+    value.scopeReviewHold = held;
+    return value;
+  }
+  function prepareScopeImport(raw) {
+    const value = quarantineScopes(raw, true);
+    if (value.branchHold) {
+      const hold = normalizeBranchHold(value.branchHold);
+      for (const key of ["items", "episodes", "threads", "entities", "facts", "docs", "threadEntries"]) {
+        hold[key] = hold[key].filter(record => {
+          if (!scopeRecords(record).length) return true;
+          hold.scopeReviewHold.push({ kind: key, record, unsupported: !["items", "episodes", "threads"].includes(key), scopeReviewPending: true });
+          return false;
+        });
+      }
+      value.branchHold = hold;
+    }
+    value.pendingReview = null;
+    value.lastAutoReviewUndo = null;
+    return value;
+  }
+  function scopeReviewMarkup() {
+    return `<div class="mmc-setting-card"><b>가져온 인물 범위 확인</b><small>확인 전에는 주입·추출에서 제외됩니다. 요소/위키의 인물 범위는 아직 지원하지 않아 보존만 합니다.</small>${safeArray(state.currentData?.scopeReviewHold).map((row, i) => `<div><b>${esc(row.record.title || row.record.name || row.kind)}</b>${row.unsupported ? '<p>지원하지 않는 범위 · 격리 보존 중</p>' : scopeRecords(row.record).map((part, j) => scopeControl(`import-${i}`, j, part.knownBy)).join("") + `<button class="mmc-btn" data-action="confirm-import-scope" data-index="${i}">선택한 ID 확인 · 복원</button>`}</div>`).join("")}</div>`;
+  }
+  async function confirmImportScope(index) {
+    const data = structuredClone(state.currentData);
+    const held = data.scopeReviewHold?.[index];
+    if (!held || held.unsupported || !["items", "episodes", "threads"].includes(held.kind)) return;
+    for (const [j, part] of scopeRecords(held.record).entries()) {
+      const ids = Array.from(document.querySelectorAll(`[data-scope-kind="import-${index}"][data-scope-index="${j}"]:checked`)).map(box => box.dataset.scopeChar);
+      if (!ids.length) throw new Error("인물 ID를 하나 이상 선택해 주세요. 빈 선택은 공개로 바꾸지 않습니다.");
+      part.knownBy = ids;
+    }
+    data.scopeReviewHold.splice(index, 1);
+    data[held.kind] = [...safeArray(data[held.kind]), held.record];
+    await patchChatMetadata(state.selectedChatId, { [DATA_KEY]: normalizeData(data) });
+    await loadCurrentChat();
+    await syncLorebook({ silent: true });
+    render();
+  }
   function normalizeData(raw) {
     const base = defaultData();
-    const value = parseRecord(raw);
+    const value = quarantineScopes(raw);
     return {
       ...base,
       ...value,
@@ -828,6 +1054,8 @@ When current and historical facts differ, current facts take precedence.`;
       wiki: normalizeWiki(value.wiki),
       pendingReview: normalizePendingReview(value.pendingReview),
       lastAutoReviewUndo: normalizeAutoReviewUndo(value.lastAutoReviewUndo),
+      ...(Array.isArray(value.episodes) ? { episodes: value.episodes.map(normalizeEpisode).filter(Boolean) } : {}),
+      ...(Array.isArray(value.threads) ? { threads: value.threads.map(normalizeThread).filter(Boolean) } : {}),
       lastSyncAt: String(value.lastSyncAt || ""),
       lastSyncError: String(value.lastSyncError || ""),
       legacyImportedAt: String(value.legacyImportedAt || ""),
@@ -835,8 +1063,138 @@ When current and historical facts differ, current facts take precedence.`;
   }
 
   function advancedMemoryEnabled(chat = state.currentChat) {
-    return parseRecord(parseRecord(chat?.metadata).advancedMemory).enabled === true;
+    return false;
   }
+
+  // ──────────────────────────────────────────────
+  // v2.1 인물 범위 · 고급 메모리 장면 소스
+  //
+  // 고급 메모리는 GET /api/chats/:id/advanced-memory 로 읽기만 한다(순정 검사 창이 쓰는 경로).
+  // 설정·레코드·일시정지 상태 등 고급 메모리 쪽에는 아무것도 쓰지 않는다.
+  // 엔진의 로어북 인물 필터는 "응답하는 인물"로 판정한다. 개별(Individual) 그룹이나 1:1에서만
+  // 실제로 가려지고, 병합 그룹에서는 한 프롬프트에 모든 인물이 들어가므로 가려지지 않는다.
+  // ──────────────────────────────────────────────
+  function chatCharacterIds(chat = state.currentChat) {
+    let raw = chat?.characterIds;
+    if (typeof raw === "string") { try { raw = JSON.parse(raw); } catch { raw = []; } }
+    return normalizeKnownBy(raw);
+  }
+  function groupChatIndividual(chat = state.currentChat) {
+    return String(parseRecord(chat?.metadata).groupChatMode || chat?.groupChatMode || "") === "individual";
+  }
+  function restrictionEffective(chat = state.currentChat) {
+    return chatCharacterIds(chat).length <= 1 || groupChatIndividual(chat);
+  }
+  async function loadChatCharacters() {
+    const ids = chatCharacterIds();
+    const rows = [];
+    for (const id of ids.slice(0, 24)) {
+      let name = "";
+      try {
+        const row = await api(`characters/${encodeURIComponent(id)}`);
+        name = String(parseRecord(row?.data).name || row?.name || "").trim();
+      } catch {}
+      rows.push({ id, name: name || id });
+    }
+    state.chatCharacters = rows;
+  }
+  function characterName(id) {
+    return state.chatCharacters.find((row) => row.id === id)?.name || String(id || "");
+  }
+  function knownByLabel(ids) {
+    const list = normalizeKnownBy(ids);
+    return list.length ? list.map(characterName).join(", ") : "모두";
+  }
+  // 이름 또는 ID 목록을 이 채팅의 인물 ID로 바꾼다. 못 찾은 값은 따로 돌려준다.
+  function resolveCharacterRefs(values) {
+    const ids = []; const unknown = [];
+    for (const raw of safeArray(values)) {
+      const value = String(raw || "").trim();
+      if (!value) continue;
+      const byId = state.chatCharacters.find((row) => row.id === value);
+      const byName = state.chatCharacters.filter((row) => row.name.trim().toLocaleLowerCase() === value.toLocaleLowerCase());
+      const hit = byId || (byName.length === 1 ? byName[0] : null);
+      if (hit) { if (!ids.includes(hit.id)) ids.push(hit.id); } else unknown.push(value);
+    }
+    return { ids, unknown };
+  }
+  const CHAR_CONDITION_RE = /\{\{#if\s+char\s*==\s*([^}]*)\}\}/gi;
+  function hasCharacterConditions(text) { return /\{\{#if\s+char\s*==/i.test(String(text || "")); }
+  // 고급 메모리 요약의 {{#if char == "A" || "B"}}…{{/if}} 구간을 모델이 읽을 수 있는 표시로 바꾼다.
+  function labelCharacterConditions(text) {
+    return String(text || "")
+      .replace(CHAR_CONDITION_RE, (_, cond) => {
+        const names = [...String(cond).matchAll(/"([^"]+)"|'([^']+)'/g)].map((m) => String(m[1] || m[2] || "").trim()).filter(Boolean);
+        return `[KNOWN ONLY BY: ${names.join(", ") || "unknown"}]`;
+      })
+      .replace(/\{\{else\}\}/gi, "[OTHERWISE — different knowers]")
+      .replace(/\{\{\/if\}\}/gi, "[/KNOWN ONLY BY]");
+  }
+  // 위키처럼 인물 범위가 없는 곳으로 보낼 때는 인물별 구간을 통째로 뺀다.
+  function stripCharacterConditionSections(text) {
+    let out = String(text || "");
+    for (let guard = 0; guard < 50 && /\{\{#if\s+char\s*==/i.test(out); guard += 1) {
+      out = out.replace(/\{\{#if\s+char\s*==[^}]*\}\}(?:(?!\{\{#if)[\s\S])*?\{\{\/if\}\}/i, "");
+      if (!/\{\{\/if\}\}/i.test(out)) { out = out.replace(/\{\{#if\s+char\s*==[^}]*\}\}[\s\S]*$/i, ""); break; }
+    }
+    return out.trim();
+  }
+  function sourceRowAudience(row) {
+    const chars = chatCharacterIds();
+    let audienceIds = [];
+    if (row?.sourceKind === AM_SCENE_SOURCE) {
+      const audience = normalizeKnownBy(row.audienceCharacterIds);
+      if (audience.length && chars.length > 1 && !chars.every((id) => audience.includes(id))) audienceIds = audience;
+    }
+    const inline = hasCharacterConditions(row?.content);
+    return { restricted: audienceIds.length > 0 || inline, audienceIds, inline };
+  }
+  function batchHasRestricted(rows) { return safeArray(rows).some((row) => sourceRowAudience(row).restricted); }
+  function amSceneRowsFromStatus(status) {
+    return safeArray(parseRecord(status).records)
+      .filter((r) => r && r.kind === "scene" && r.enabled === true && r.status === "closed" && String(r.content || "").trim())
+      .map((r) => ({
+        id: `am:${String(r.id)}`,
+        title: String(r.title || "").trim() || "장면 요약",
+        content: String(r.content),
+        origin: "advanced-memory",
+        enabled: true,
+        createdAt: String(r.createdAt || ""),
+        updatedAt: String(r.updatedAt || ""),
+        sourceKind: AM_SCENE_SOURCE,
+        amRecordId: String(r.id),
+        sourceFingerprint: String(r.sourceFingerprint || ""),
+        audienceCharacterIds: normalizeKnownBy(r.audienceCharacterIds),
+        timeline: String(r.timeline || ""),
+        startIndex: Number(r.startIndex) || 0,
+        endIndex: Number(r.endIndex) || 0,
+      }))
+      .sort((a, b) => a.startIndex - b.startIndex || a.createdAt.localeCompare(b.createdAt));
+  }
+  function amKnownKey(chatId) { return `am:${chatId}`; }
+  async function acceptAmStatus(chatId, status) {
+    if (!chatId || chatId !== String(state.selectedChatId || "")) return;
+    state.amChatId = chatId;
+    state.sceneSettings = parseRecord(parseRecord(status).settings);
+    state.amSceneRows = amSceneRowsFromStatus(status);
+    state.amAllFingerprints = new Set(safeArray(parseRecord(status).records).filter((r) => r && r.kind === "scene" && r.enabled !== false).map((r) => String(r.sourceFingerprint || "")).filter(Boolean));
+    state.amSceneError = "";
+    const key = amKnownKey(chatId);
+    if (!Array.isArray(state.summaryKnownByChat[key])) {
+      // 처음 보는 방: 이미 있던 장면은 기준선으로 삼는다. 필요하면 원문 선택 창에서 직접 고를 수 있다.
+      state.summaryKnownByChat[key] = state.amSceneRows.map(summarySignature).slice(-260);
+      state.pendingAmRows = [];
+      await saveUiState();
+    } else {
+      const known = new Set(safeArray(state.summaryKnownByChat[key]).map(String));
+      state.pendingAmRows = state.amSceneRows.filter((row) => !known.has(summarySignature(row)));
+    }
+  }
+  async function refreshAdvancedMemoryScenes(chatId = String(state.selectedChatId || "")) {
+    // ST에는 AM 장면 API가 없다. Summarize와 수동 원문만 사용한다.
+    state.amSceneRows = []; state.pendingAmRows = []; state.sceneSettings = null; state.amSceneError = ""; state.amChatId = chatId;
+  }
+  function amRowsPending(rows) { return safeArray(rows).filter((row) => row?.sourceKind === AM_SCENE_SOURCE); }
 
   function branchParentChatId(chat = state.currentChat) {
     const metadata = parseRecord(chat?.metadata);
@@ -850,9 +1208,13 @@ When current and historical facts differ, current facts take precedence.`;
     return safeArray(value.items).length > 0
       || safeArray(memory.entities).length > 0
       || safeArray(wiki.docs).length > 0
+      || safeArray(value.episodes).length > 0
+      || safeArray(value.threads).length > 0
       || Object.keys(parseRecord(wiki.docEntryIds)).length > 0
       || !!String(wiki.headerEntryId || wiki.alwaysEntryId || wiki.originChatId || "")
       || !!normalizePendingReview(value.pendingReview)
+      || branchHoldCount(value.branchHold) > 0
+      || safeArray(value.scopeReviewHold).length > 0
       || !!normalizeAutoReviewUndo(value.lastAutoReviewUndo)
       || !!String(value.lorebookId || value.promiseEntryId || value.anchorEntryId || value.backupEntryId || "")
       || Object.keys(parseRecord(value.keywordEntryIds)).length > 0
@@ -918,6 +1280,92 @@ When current and historical facts differ, current facts take precedence.`;
     return { status: "new", ownerChatId: chatId, evidence: "empty", reason: "" };
   }
 
+  // ──────────────────────────────────────────────
+  // v2.1 분기 처리
+  // 엔진은 분기 때 부모 metadata를 통째로 복사한다. 분기 메시지 시각보다 뒤에 부모에서 생기거나 바뀐 기록은
+  // 분기에서 '분기 확인 대기'로 옮겨 주입하지 않는다. 지우지 않고, 사용자가 넣거나 뺄 수 있다.
+  // ──────────────────────────────────────────────
+  function timeAfter(value, cutMs) {
+    const t = Date.parse(String(value || ""));
+    return Number.isFinite(t) && Number.isFinite(cutMs) && t > cutMs;
+  }
+  async function branchCutPoint(chat) {
+    return host.getBranchCutPoint ? await host.getBranchCutPoint(chat.id) : null;
+  }
+  function emptyBranchHold() {
+    return { parentChatId: "", cutAt: "", cutMessageId: "", createdAt: "", items: [], entities: [], facts: [], docs: [], episodes: [], threads: [], threadEntries: [] };
+  }
+  function normalizeBranchHold(value) {
+    const raw = parseRecord(value);
+    const hold = { ...emptyBranchHold(), ...raw };
+    for (const key of ["items", "entities", "facts", "docs", "episodes", "threads", "threadEntries", "scopeReviewHold"]) hold[key] = safeArray(raw[key]).filter(isRecord);
+    return hold;
+  }
+  function branchHoldCount(value) {
+    const hold = normalizeBranchHold(value);
+    return ["items", "entities", "facts", "docs", "episodes", "threads", "threadEntries", "scopeReviewHold"].reduce((sum, key) => sum + hold[key].length, 0);
+  }
+  function holdPostBranchRecords(data, cut, parentChatId, rawData = data) {
+    const next = normalizeData(data);
+    // 시각은 정규화 전 원본에서 읽는다. 시각이 없는 옛 기록은 정규화 때 '지금'이 붙으므로, 없으면 분기 이전으로 본다.
+    const raw = parseRecord(rawData);
+    const rawItems = new Map(safeArray(raw.items).filter(isRecord).map((row) => [String(row.id || ""), row]));
+    const rawEntities = new Map(safeArray(parseRecord(raw.elementMemory).entities).filter(isRecord).map((row) => [String(row.id || ""), row]));
+    const rawDocs = new Map(safeArray(parseRecord(raw.wiki).docs).filter(isRecord).map((row) => [String(row.id || ""), row]));
+    const rawFactAt = (entityId, text) => {
+      const entity = rawEntities.get(String(entityId)) || {};
+      const hit = [...safeArray(entity.currentFacts), ...safeArray(entity.historyFacts)].find((fact) => isRecord(fact) && String(fact.text || fact.content || "").trim() === String(text || "").trim());
+      return hit?.createdAt || "";
+    };
+    // 승인 대기 후보와 자동 적용 되돌리기는 부모의 작업 상태다. 분기로 가져가지 않는다(부모에는 그대로 남는다).
+    next.pendingReview = null;
+    next.lastAutoReviewUndo = null;
+    const scopeHold = normalizeBranchHold(next.branchHold);
+    scopeHold.scopeReviewHold.push(...safeArray(next.scopeReviewHold));
+    next.scopeReviewHold = [];
+    next.branchHold = scopeHold;
+    const cutMs = Date.parse(String(cut?.at || ""));
+    if (!Number.isFinite(cutMs)) {
+      const hold = normalizeBranchHold(next.branchHold);
+      Object.assign(hold, { parentChatId: String(parentChatId || ""), createdAt: nowIso(), reason: "분기 절단점을 확인하지 못했습니다. 기록을 확인해 주세요." });
+      for (const [key, rows] of [["items", next.items], ["entities", next.elementMemory.entities], ["docs", next.wiki.docs], ["episodes", next.episodes || []], ["threads", next.threads || []]]) hold[key].push(...rows);
+      next.items = []; next.elementMemory.entities = []; next.wiki.docs = []; next.episodes = []; next.threads = [];
+      next.branchHold = hold;
+      return next;
+    }
+    const hold = normalizeBranchHold(next.branchHold);
+    Object.assign(hold, { parentChatId: String(parentChatId || ""), cutAt: String(cut.at), cutMessageId: String(cut.messageId || ""), createdAt: nowIso() });
+    next.items = next.items.filter((item) => {
+      const src = rawItems.get(item.id) || {};
+      const reason = timeAfter(src.createdAt, cutMs) ? "created" : timeAfter(src.updatedAt, cutMs) ? "updated" : "";
+      if (!reason) return true;
+      hold.items.push({ ...item, holdReason: reason });
+      return false;
+    });
+    const memory = next.elementMemory;
+    memory.entities = memory.entities.filter((entity) => {
+      if (timeAfter(rawEntities.get(entity.id)?.createdAt, cutMs)) { hold.entities.push({ ...entity, holdReason: "created" }); return false; }
+      for (const list of ["currentFacts", "historyFacts"]) {
+        entity[list] = entity[list].filter((fact) => {
+          if (!timeAfter(rawFactAt(entity.id, fact.text), cutMs)) return true;
+          hold.facts.push({ entityId: entity.id, entityName: entity.name, list, fact });
+          return false;
+        });
+      }
+      return true;
+    });
+    next.wiki.docs = next.wiki.docs.filter((doc) => {
+      const src = rawDocs.get(doc.id) || {};
+      const reason = timeAfter(src.createdAt, cutMs) ? "created" : timeAfter(src.updatedAt, cutMs) ? "updated" : "";
+      if (!reason) return true;
+      hold.docs.push({ ...doc, holdReason: reason });
+      return false;
+    });
+    if (typeof holdPostBranchLayers === "function") holdPostBranchLayers(next, hold, cutMs, raw);
+    if (branchHoldCount(hold)) next.branchHold = hold;
+    return next;
+  }
+
   function resetManagedPointersForOwner(data, chatId) {
     const next = normalizeData(data);
     const previousBookIds = [next.lorebookId].map(String).filter(Boolean);
@@ -936,9 +1384,41 @@ When current and historical facts differ, current facts take precedence.`;
     next.wiki.headerEntryId = "";
     next.wiki.alwaysEntryId = "";
     next.wiki.docEntryIds = {};
+    if (next.restrictedEntryIds) next.restrictedEntryIds = {};
+    if (next.episodeEntryIds) next.episodeEntryIds = {};
+    if (next.threadEntryId) next.threadEntryId = "";
+    if (next.threadRestrictedEntryIds) next.threadRestrictedEntryIds = {};
     next.lastSyncAt = "";
     next.lastSyncError = "";
     return { data: next, previousBookIds };
+  }
+
+  // 저장된 화면 상태를 읽기 전에 저장하면 다른 RP의 검토 기준선과 설정이 빈 값으로 덮인다(2.5.0 실제 설치본에서 확인).
+  let uiLoadPromise = null;
+  function ensureUiLoaded() {
+    if (state.uiLoaded) return Promise.resolve();
+    if (!uiLoadPromise) {
+      const keepSelected = String(state.selectedChatId || "");
+      uiLoadPromise = loadUiState().then(() => { if (keepSelected) state.selectedChatId = keepSelected; }).finally(() => { uiLoadPromise = null; });
+    }
+    return uiLoadPromise;
+  }
+  async function readStoredUiState() {
+    return parseRecord((await host.storage.get())[EXT_STORAGE_KEY]);
+  }
+  // 다른 기기·탭이 그 사이 더한 RP별 기록을 지우지 않는다. 같은 RP 키는 이 화면의 값이 이긴다(검토 기준선은 합집합).
+  function mergeUiMaps(stored, current) {
+    const known = { ...parseRecord(stored.summaryKnownByChat) };
+    for (const [key, list] of Object.entries(parseRecord(current.summaryKnownByChat))) {
+      known[key] = Array.from(new Set([...safeArray(known[key]).map(String), ...safeArray(list).map(String)])).slice(-260);
+    }
+    return {
+      summaryKnownByChat: known,
+      // 자동 정리 시도 표시는 실패하면 일부러 지워 다시 시도하게 하므로 합치지 않는다.
+      summaryAutoAttemptByChat: parseRecord(current.summaryAutoAttemptByChat),
+      sourceWatchByChat: { ...parseRecord(stored.sourceWatchByChat), ...parseRecord(current.sourceWatchByChat) },
+      agentNoticeDismissed: { ...parseRecord(stored.agentNoticeDismissed), ...parseRecord(current.agentNoticeDismissed) },
+    };
   }
 
   async function loadUiState() {
@@ -960,14 +1440,18 @@ When current and historical facts differ, current facts take precedence.`;
     state.reviewExtraInstruction = String(saved.reviewExtraInstruction || "");
     state.summaryKnownByChat = parseRecord(saved.summaryKnownByChat);
     state.summaryAutoAttemptByChat = parseRecord(saved.summaryAutoAttemptByChat);
+    state.sourceWatchByChat = parseRecord(saved.sourceWatchByChat);
     state.summaryUpdateMode = Object.prototype.hasOwnProperty.call(SUMMARY_UPDATE_MODE_LABEL, saved.summaryUpdateMode) ? saved.summaryUpdateMode : "notify_model";
     state.elementExtractMode = saved.elementExtractMode === "range" ? "range" : "recent";
     state.elementExtractTurns = Math.max(1, Math.min(100, Number(saved.elementExtractTurns) || 20));
     state.elementRangeStart = Math.max(1, Number(saved.elementRangeStart) || 1);
     state.elementRangeEnd = Math.max(state.elementRangeStart, Number(saved.elementRangeEnd) || 20);
+    state.uiLoaded = true;
   }
 
   async function saveUiState(patch = {}) {
+    if (!state.uiLoaded) await ensureUiLoaded();
+    const stored = await readStoredUiState();
     const current = {
       selectedChatId: state.selectedChatId,
       activeTab: state.activeTab,
@@ -981,6 +1465,7 @@ When current and historical facts differ, current facts take precedence.`;
       reviewExtraInstruction: state.reviewExtraInstruction,
       summaryKnownByChat: state.summaryKnownByChat,
       summaryAutoAttemptByChat: state.summaryAutoAttemptByChat,
+      sourceWatchByChat: state.sourceWatchByChat,
       summaryUpdateMode: state.summaryUpdateMode,
       elementExtractMode: state.elementExtractMode,
       elementExtractTurns: state.elementExtractTurns,
@@ -992,6 +1477,10 @@ When current and historical facts differ, current facts take precedence.`;
       agentNoticeDismissed: state.agentNoticeDismissed,
       ...patch,
     };
+    Object.assign(current, mergeUiMaps(stored, current));
+    state.summaryKnownByChat = current.summaryKnownByChat;
+    state.sourceWatchByChat = current.sourceWatchByChat;
+    state.agentNoticeDismissed = current.agentNoticeDismissed;
     await host.storage.patch({ [EXT_STORAGE_KEY]: current });
   }
 
@@ -1062,6 +1551,7 @@ When current and historical facts differ, current facts take precedence.`;
 
     if (decision.status === "branch") {
       const prepared = resetManagedPointersForOwner(rawData, chatId);
+      prepared.data = holdPostBranchRecords(prepared.data, await branchCutPoint(chat), branchParentChatId(chat), rawData);
       state.currentData = prepared.data;
       state.ownershipDetachLorebookIds = [...new Set([...prepared.previousBookIds, ...resources.foreignActiveIds])];
       state.ownership = { ...decision, status: "branch-owned", ownerChatId: chatId, backup: null, discoveryChecked: resources.discoveryChecked };
@@ -1095,6 +1585,7 @@ When current and historical facts differ, current facts take precedence.`;
     try { full = await api(`chats/${encodeURIComponent(state.selectedChatId)}`); } catch {}
     const fallback = state.chats.find((chat) => chat.id === state.selectedChatId) || null;
     state.currentChat = full && isRecord(full) ? { ...fallback, ...full, id: state.selectedChatId, metadata: parseRecord(full.metadata) } : fallback;
+    try { await loadChatCharacters(); } catch (error) { state.chatCharacters = []; console.warn("[기억 보관함] character names failed", error); }
     await applyOwnershipForCurrentChat(parseRecord(state.currentChat?.metadata)[DATA_KEY]);
     if (!state.modelConnectionId) state.modelConnectionId = chooseDefaultConnection(state.currentChat);
     state.elementExtractTurns = state.currentData.elementMemory.extractTurns || state.elementExtractTurns || 20;
@@ -1139,8 +1630,18 @@ When current and historical facts differ, current facts take precedence.`;
     state.reviewCandidates = [];
     state.reviewSelected.clear();
     state.reviewSourceRows = [];
+    state.reviewEpisodes = [];
+    state.reviewEpisodeSelected = new Set();
+    state.reviewThreads = [];
+    state.reviewThreadSelected = new Set();
     const pending = state.currentData?.pendingReview;
     if (!pending) return;
+    state.reviewThreads = safeArray(pending.threads).map(normalizeThreadCandidate).filter(Boolean);
+    const thSel = new Set(safeArray(pending.selectedThreadIds).map(String));
+    state.reviewThreadSelected = new Set(state.reviewThreads.map((cand, i) => (thSel.has(cand.candidateId) ? String(i) : null)).filter(Boolean));
+    state.reviewEpisodes = safeArray(pending.episodes).map(normalizeEpisodeCandidate).filter(Boolean);
+    const epSel = new Set(safeArray(pending.selectedEpisodeIds).map(String));
+    state.reviewEpisodeSelected = new Set(state.reviewEpisodes.map((cand, i) => (epSel.has(cand.candidateId) ? String(i) : null)).filter(Boolean));
     state.reviewCandidates = safeArray(pending.candidates).map(normalizeReviewCandidate).filter(Boolean);
     state.reviewSourceRows = safeArray(pending.sourceRows).map((row) => ({ ...row }));
     const selected = new Set(safeArray(pending.selectedIndices).map(String));
@@ -1155,6 +1656,10 @@ When current and historical facts differ, current facts take precedence.`;
       candidates: state.reviewCandidates,
       selectedIndices: [...state.reviewSelected],
       selectedCandidateIds: state.reviewCandidates.filter((_, index) => state.reviewSelected.has(String(index))).map((candidate) => candidate.candidateId),
+      episodes: state.reviewEpisodes,
+      threads: state.reviewThreads,
+      selectedThreadIds: state.reviewThreads.filter((_, index) => state.reviewThreadSelected.has(String(index))).map((cand) => cand.candidateId),
+      selectedEpisodeIds: state.reviewEpisodes.filter((_, index) => state.reviewEpisodeSelected.has(String(index))).map((cand) => cand.candidateId),
       sourceRows: state.reviewSourceRows,
       batchKey: summaryBatchKey(state.reviewSourceRows),
       createdAt: data.pendingReview?.createdAt || nowIso(),
@@ -1171,6 +1676,10 @@ When current and historical facts differ, current facts take precedence.`;
     state.reviewCandidates = [];
     state.reviewSelected.clear();
     state.reviewSourceRows = [];
+    state.reviewEpisodes = [];
+    state.reviewEpisodeSelected = new Set();
+    state.reviewThreads = [];
+    state.reviewThreadSelected = new Set();
   }
 
   async function refreshAll({ renderAfter = true } = {}) {
@@ -1191,7 +1700,7 @@ When current and historical facts differ, current facts take precedence.`;
     launcher.title = count > 0 ? `새 요약 ${count}개 · 기억 갱신 필요` : "기억 보관함";
   }
 
-  async function checkNewSummaries({ refreshChat = true, baselineIfUnknown = true, renderAfter = false } = {}) {
+  async function checkNewSummaries({ refreshChat = true, baselineIfUnknown = true, renderAfter = false, refreshScenes = refreshChat } = {}) {
     const chatId = String(state.selectedChatId || "");
     if (!chatId || state.summaryCheckBusy || !ownershipAllowsData()) return [];
     state.summaryCheckBusy = true;
@@ -1207,17 +1716,19 @@ When current and historical facts differ, current facts take precedence.`;
       }
       const rows = summaryRowsFromMetadata(state.currentChat?.metadata);
       const hasBaseline = Array.isArray(state.summaryKnownByChat[chatId]);
+      let summaryPending = [];
       if (!hasBaseline && baselineIfUnknown) {
         state.summaryKnownByChat[chatId] = rows.map(summarySignature).slice(-260);
-        state.pendingSummaryRows = [];
         await saveUiState();
       } else {
         const known = new Set(safeArray(state.summaryKnownByChat[chatId]).map(String));
-        state.pendingSummaryRows = rows.filter((row) => !known.has(summarySignature(row)));
+        summaryPending = rows.filter((row) => !known.has(summarySignature(row)));
       }
+      if (refreshScenes || state.amChatId !== chatId || !advancedMemoryEnabled()) await refreshAdvancedMemoryScenes(chatId);
+      state.pendingSummaryRows = [...summaryPending, ...state.pendingAmRows];
       updateLauncherBadge();
       if (renderAfter && !document.getElementById(ROOT_ID)?.hidden) render();
-      if (state.pendingSummaryRows.length && !advancedMemoryEnabled()) void maybeAutoProcessSummaries();
+      if (summaryPending.length && !advancedMemoryEnabled()) void maybeAutoProcessSummaries();
       return state.pendingSummaryRows;
     } catch (error) {
       console.warn("[기억 보관함] summary check failed", error);
@@ -1230,11 +1741,18 @@ When current and historical facts differ, current facts take precedence.`;
   async function markSummaryRowsReviewed(rows) {
     const chatId = String(state.selectedChatId || "");
     if (!chatId) return;
-    const current = safeArray(state.summaryKnownByChat[chatId]).map(String);
-    const seen = new Set(current);
+    const seen = new Set(safeArray(state.summaryKnownByChat[chatId]).map(String));
+    const amKey = amKnownKey(chatId);
+    const sceneSeen = new Set(safeArray(state.summaryKnownByChat[amKey]).map(String));
     const reviewed = new Set();
-    for (const row of safeArray(rows)) { const sig = summarySignature(row); seen.add(sig); reviewed.add(sig); }
+    for (const row of safeArray(rows)) {
+      const sig = summarySignature(row);
+      (row?.sourceKind === AM_SCENE_SOURCE ? sceneSeen : seen).add(sig);
+      reviewed.add(sig);
+    }
     state.summaryKnownByChat[chatId] = Array.from(seen).slice(-260);
+    if (sceneSeen.size || Array.isArray(state.summaryKnownByChat[amKey])) state.summaryKnownByChat[amKey] = Array.from(sceneSeen).slice(-260);
+    state.pendingAmRows = state.pendingAmRows.filter((row) => !reviewed.has(summarySignature(row)));
     state.pendingSummaryRows = state.pendingSummaryRows.filter((row) => !reviewed.has(summarySignature(row)));
     updateLauncherBadge();
     await saveUiState();
@@ -1267,7 +1785,11 @@ When current and historical facts differ, current facts take precedence.`;
     try {
       const generated = await generateReviewCandidates(rows, { showLayer: false });
       if (!generated) return;
-      if (state.summaryUpdateMode === "auto_apply") {
+      if (state.summaryUpdateMode === "auto_apply" && state.reviewCandidates.some(scopeBlocksApply)) {
+        // 일부 인물만 아는 내용이 섞이면 자동 적용하지 않는다. 후보는 검토 대기에 그대로 남긴다.
+        toast(`일부 인물만 아는 내용이 있어 자동 적용하지 않고 후보 ${state.reviewCandidates.length}개를 검토 대기에 남겼어요.`);
+        render();
+      } else if (state.summaryUpdateMode === "auto_apply") {
         const actionable = state.reviewCandidates.some((item, i) => item.action !== "keep" && state.reviewSelected.has(String(i)));
         if (actionable) {
           await applyReviewCandidates({ auto: true });
@@ -1304,6 +1826,11 @@ When current and historical facts differ, current facts take precedence.`;
   }
 
   async function acceptObservedChatSnapshot(chatId, payload) {
+    await ensureUiLoaded();
+    if (chatId && isRecord(payload) && chatId !== String(state.selectedChatId || "") && isInheritedBranch({ ...payload, id: chatId, metadata: parseRecord(payload.metadata) })) {
+      await splitInheritedBranch(chatId);
+      return;
+    }
     if (!chatId || chatId !== String(state.selectedChatId || "") || !payload || !isRecord(payload)) return;
     const metadata = parseRecord(payload.metadata);
     const existingMeta = parseRecord(state.currentChat?.metadata);
@@ -1319,21 +1846,33 @@ When current and historical facts differ, current facts take precedence.`;
         summary: metadata.summary,
         summaryEntries: metadata.summaryEntries,
         lastAutomaticSummaryMessageId: metadata.lastAutomaticSummaryMessageId,
+        advancedMemory: metadata.advancedMemory,
+        groupChatMode: metadata.groupChatMode,
       },
     };
 
     const rows = summaryRowsFromMetadata(metadata);
     const hasBaseline = Array.isArray(state.summaryKnownByChat[chatId]);
+    let summaryPending = [];
     if (!hasBaseline) {
       state.summaryKnownByChat[chatId] = rows.map(summarySignature).slice(-260);
-      state.pendingSummaryRows = [];
       await saveUiState();
     } else {
       const known = new Set(safeArray(state.summaryKnownByChat[chatId]).map(String));
-      state.pendingSummaryRows = rows.filter((row) => !known.has(summarySignature(row)));
+      summaryPending = rows.filter((row) => !known.has(summarySignature(row)));
     }
+    state.pendingSummaryRows = [...summaryPending, ...state.pendingAmRows];
     refreshSummaryAlertDom();
-    if (state.pendingSummaryRows.length && ownershipAllowsData() && !advancedMemoryEnabled()) void maybeAutoProcessSummaries();
+    if (summaryPending.length && ownershipAllowsData() && !advancedMemoryEnabled()) void maybeAutoProcessSummaries();
+  }
+
+  async function acceptObservedAmSnapshot(chatId, payload) {
+    await ensureUiLoaded();
+    if (!chatId || chatId !== String(state.selectedChatId || "") || !isRecord(payload) || !advancedMemoryEnabled() || !ownershipAllowsData()) return;
+    await acceptAmStatus(chatId, payload);
+    const summaryPending = state.pendingSummaryRows.filter((row) => row?.sourceKind !== AM_SCENE_SOURCE);
+    state.pendingSummaryRows = [...summaryPending, ...state.pendingAmRows];
+    refreshSummaryAlertDom();
   }
 
   function installPassiveSummaryObserver() {
@@ -1364,11 +1903,43 @@ When current and historical facts differ, current facts take precedence.`;
     cleanupFns.push(() => { disposed = true; clearTimeout(pendingTimer); unsubscribe(); });
   }
 
+  function isInheritedBranch(chat) {
+    const meta = parseRecord(chat?.metadata);
+    const raw = parseRecord(meta[DATA_KEY]);
+    const parent = String(meta.branchParentChatId || "");
+    const owner = String(raw.ownerChatId || parseRecord(raw.elementMemory).originChatId || "");
+    return !!parent && !!owner && owner === parent && owner !== String(chat?.id || "") && hasMeaningfulMemoryData(raw);
+  }
+  // 보관함을 열지 않아도, 부모 기억을 그대로 들고 있는 분기를 찾으면 바로 분리한다(부모 책 떼기·전용 책 만들기·분기 이후 기록 대기).
+  async function splitInheritedBranch(chatId) {
+    const root = document.getElementById(ROOT_ID);
+    if (state.branchSplitBusy || state.busy || state.layer || (root && !root.hidden)) return false;
+    await ensureUiLoaded();
+    state.branchSplitBusy = true;
+    const previous = String(state.selectedChatId || "");
+    try {
+      state.selectedChatId = chatId;
+      await loadCurrentChat();
+      return true;
+    } catch (error) {
+      console.warn("[기억 보관함] branch split failed", error);
+      return false;
+    } finally {
+      state.selectedChatId = previous || chatId;
+      try { if (previous && previous !== chatId) await loadCurrentChat(); } catch {}
+      state.branchSplitBusy = false;
+    }
+  }
+  async function splitInheritedBranches() {
+    for (const chat of state.chats.filter(isInheritedBranch).slice(0, 12)) await splitInheritedBranch(chat.id);
+  }
+
   async function primeSummaryObserver() {
     if (state.busy || state.syncing || state.actionPending) return;
     try {
       await loadUiState();
       await loadChats();
+      await splitInheritedBranches();
       await loadCurrentChat();
       await checkNewSummaries({ refreshChat: false, baselineIfUnknown: true, renderAfter: false });
     } catch (error) {
@@ -1408,7 +1979,14 @@ When current and historical facts differ, current facts take precedence.`;
     next.updatedAt = nowIso();
     await patchChatMetadata(state.currentChat.id, { [DATA_KEY]: next });
     state.currentData = next;
-    if (sync) await syncLorebook({ silent: true });
+    if (sync) {
+      try { await syncLorebook({ silent: true }); }
+      catch (error) {
+        // 기억은 이미 저장됐다. 저장 실패로 오인해 같은 작업을 다시 하지 않도록 동기화 실패만 알린다.
+        toast(`기억은 저장했지만 로어북 동기화에 실패했어요. 머리줄의 동기화 버튼으로 다시 시도해 주세요. (${error?.message || "오류"})`, true);
+        return state.currentData;
+      }
+    }
     if (!silent) toast("저장했습니다.");
     return state.currentData;
   }
@@ -1452,9 +2030,22 @@ When current and historical facts differ, current facts take precedence.`;
     return `- [${ANCHOR_CATEGORY_LABEL[item.category] || "기억"}] ${truncate(item.title, 90)}: ${truncate(item.content, 360)}`;
   }
 
+  // v2.1: 주입 직전 정리. 같은 제목(공백·기호 무시)은 아는 인물 범위가 같을 때 하나만 넣는다.
+  // 우선순위·최근 수정 순으로 정렬된 목록에서 앞의 것을 남기므로 새 상태가 옛 상태를 이긴다.
+  function titleKey(value) { return String(value || "").toLocaleLowerCase().replace(/[\s\p{P}\p{S}]+/gu, ""); }
+  function dedupeByTitle(list) {
+    const seen = new Set(); const kept = []; const dropped = [];
+    for (const item of safeArray(list)) {
+      const key = `${item.type}|${titleKey(item.title)}|${normalizeKnownBy(item.knownBy).slice().sort().join(",")}`;
+      if (titleKey(item.title) && seen.has(key)) { dropped.push(item); continue; }
+      seen.add(key); kept.push(item);
+    }
+    return { kept, dropped };
+  }
   function anchorInjectionPlan(data = state.currentData) {
     const normalized = normalizeData(data || {});
-    const all = activeAlwaysAnchors(normalized);
+    const deduped = dedupeByTitle(activeAlwaysAnchors(normalized));
+    const all = deduped.kept;
     const considered = all.slice(0, normalized.maxAnchors);
     const budget = normalized.anchorBudgetChars;
     const selected = [];
@@ -1467,7 +2058,31 @@ When current and historical facts differ, current facts take precedence.`;
         used += cost;
       } else excluded.push(item);
     }
-    return { candidates: all, considered, selected, excluded, used, budget };
+    return { candidates: all, considered, selected, excluded, used, budget, duplicates: deduped.dropped };
+  }
+  // 보관함 상시 주입 전체 계획. 약속·항상 앵커(·진행 흐름)를 한 곳에서 정하고, 총 상한이 있으면 여기서만 자른다.
+  function injectionPlan(data = state.currentData) {
+    const d = normalizeData(data || {});
+    const promiseDedupe = dedupeByTitle(activePromises(d));
+    const promises = promiseDedupe.kept.slice(0, d.maxPromises);
+    const aplan = anchorInjectionPlan(d);
+    const anchors = aplan.selected.slice();
+    const extra = typeof injectionPlanLayers === "function" ? injectionPlanLayers(d) : { threads: [], duplicates: [] };
+    const threads = safeArray(extra.threads).slice();
+    const cap = Math.max(0, Number(d.alwaysBudgetTokens) || 0);
+    const capHeld = [];
+    if (cap > 0) {
+      const cost = (item) => estimateTokens(item.type === "thread" ? `${item.title} ${item.currentState || ""}` : `${item.title} ${truncate(item.content, 360)}`) + 4;
+      let total = [...promises, ...anchors, ...threads].reduce((sum, item) => sum + cost(item), 0);
+      const pool = [...promises, ...anchors, ...threads].filter((item) => item.priority !== "high")
+        .sort((a, b) => (PRIORITY_WEIGHT[b.priority] ?? 1) - (PRIORITY_WEIGHT[a.priority] ?? 1) || String(a.updatedAt || "").localeCompare(String(b.updatedAt || "")));
+      while (total > cap && pool.length) {
+        const item = pool.shift();
+        for (const list of [promises, anchors, threads]) { const i = list.indexOf(item); if (i >= 0) list.splice(i, 1); }
+        capHeld.push(item); total -= cost(item);
+      }
+    }
+    return { promises, anchors, threads, capHeld, duplicates: [...promiseDedupe.dropped, ...aplan.duplicates, ...safeArray(extra.duplicates)], overflowPromises: promiseDedupe.kept.slice(d.maxPromises), anchorPlan: aplan };
   }
 
   function managedBookMarker(chatId) { return `${BOOK_MARKER} chat:${chatId}`; }
@@ -1586,8 +2201,42 @@ When current and historical facts differ, current facts take precedence.`;
     const docs = Math.min(6, wiki.docs.filter((doc) => wikiDocInjectable(doc, wiki)).length) * 600;
     return always + docs;
   }
+  function sharedPromises(data) { return injectionPlan(data).promises.filter((item) => !isRestrictedItem(item)); }
+  function sharedAnchors(data) { return injectionPlan(data).anchors.filter((item) => !isRestrictedItem(item)); }
+  // 일부 인물만 아는 약속·항상 앵커. 같은 개수·예산 안에서 고른 뒤 공용 블록과 나눠 넣는다.
+  function restrictedInjectionItems(data) {
+    const normalized = normalizeData(data || {});
+    const plan = injectionPlan(normalized);
+    return [...plan.promises, ...plan.anchors].filter(isRestrictedItem);
+  }
+  function restrictedContext(chat, item) {
+    const names = knownByLabel(item.knownBy);
+    const line = item.type === "promise"
+      ? `- ${item.priority === "high" ? "[중요] " : ""}${truncate(item.title, 90)}: ${truncate(item.content, 320)}${item.scheduleText ? ` / 예정: ${truncate(item.scheduleText, 90)}` : ""}`
+      : anchorLine(item);
+    return [
+      RESTRICTED_MARKER,
+      `[${item.type === "promise" ? "약속" : "기억 앵커"} · ${chatLabel(chat)} · ${names}만 아는 기억]`,
+      `아래 내용은 ${names}만 알고 있다. 이것을 모르는 인물이 알고 있는 것처럼 말하거나 행동하게 하지 마라.`,
+      line,
+    ].join("\n");
+  }
+  function restrictedEntryPayload(chat, item, enabled) {
+    return {
+      ...constantEntryPayload({
+        tag: RESTRICTED_ENTRY_TAG,
+        name: `${item.type === "promise" ? "약속" : "기억 앵커"} · ${truncate(item.title, 100)} · 일부만 앎`,
+        content: restrictedContext(chat, item),
+        enabled,
+        order: item.type === "promise" ? 31 : 34,
+        dynamicState: { memoryCabinetChatId: String(chat.id), memoryCabinetItemId: String(item.id), managedBy: LOREBOOK_TAG, kind: "restricted" },
+      }),
+      characterFilterMode: "include",
+      characterFilterIds: normalizeKnownBy(item.knownBy),
+    };
+  }
   function promiseContext(chat, data) {
-    const items = activePromises(data).slice(0, data.maxPromises);
+    const items = sharedPromises(data);
     const lines = [
       PROMISE_MARKER,
       `[약속 · ${chatLabel(chat)}]`,
@@ -1598,11 +2247,12 @@ When current and historical facts differ, current facts take precedence.`;
       lines.push(`- ${item.priority === "high" ? "[중요] " : ""}${truncate(item.title, 90)}: ${truncate(item.content, 320)}${schedule}`);
     }
     lines.push("관련 상황에서 자연스럽게 기억하되 목록을 먼저 낭독하지 말고, 기록에 없는 약속을 새로 만들지 마라.");
+    lines.push("같은 일에 대해 이 기록이 떠올린 옛 장면·요약과 다르면 이 기록을 최신 상태로 본다.");
     return lines.join("\n");
   }
 
   function anchorContext(chat, data) {
-    const items = anchorInjectionPlan(data).selected;
+    const items = sharedAnchors(data);
     const lines = [
       ANCHOR_MARKER,
       `[기억 앵커 · ${chatLabel(chat)}]`,
@@ -1610,6 +2260,7 @@ When current and historical facts differ, current facts take precedence.`;
     ];
     for (const item of items) lines.push(anchorLine(item));
     lines.push("현재 서사와 충돌하지 않는 범위에서 지속적으로 유지하라. 목록 자체를 대사로 낭독하지 마라.");
+    lines.push("같은 일에 대해 이 기록이 떠올린 옛 장면·요약과 다르면 이 기록을 최신 상태로 본다.");
     return lines.join("\n");
   }
 
@@ -1692,10 +2343,16 @@ When current and historical facts differ, current facts take precedence.`;
       excludeFromVectorization: true,
       tag: KEYWORD_ENTRY_TAG,
       dynamicState: { memoryCabinetChatId: String(chat.id), memoryCabinetItemId: String(item.id), managedBy: LOREBOOK_TAG },
+      ...(isRestrictedItem(item)
+        ? { enabled: restrictionEffective(chat), characterFilterMode: "include", characterFilterIds: normalizeKnownBy(item.knownBy) }
+        : { characterFilterMode: "any", characterFilterIds: [] }),
     };
   }
 
-  async function upsertEntry(bookId, entries, entryId, matcher, payload) {
+  async function upsertEntry(bookId, entries, entryId, matcher, rawPayload) {
+    // v2.1: 보관함 관리 항목은 모두 잠근다. Lorebook Keeper 같은 에이전트는 잠긴 항목을 덮어쓰지 않는다.
+    // 사람의 편집과 보관함 자신의 PATCH는 잠금과 상관없이 동작한다.
+    const payload = { ...rawPayload };
     let entry = null;
     if (entryId) entry = entries.find((row) => String(row.id) === String(entryId)) || null;
     if (!entry) entry = entries.find(matcher) || null;
@@ -1708,8 +2365,51 @@ When current and historical facts differ, current facts take precedence.`;
     return String(created.id);
   }
 
+  // v2.1: 동기화는 한 번에 하나만 돈다. 도는 중에 다른 저장이 오면 끝난 뒤 최신 데이터로 한 번 더 돈다.
+  // 동기화가 끝나면 스냅샷 전체가 아니라 로어북 포인터만 최신 데이터에 합쳐 저장한다(수정 유실 방지).
+  const SYNC_CONTENT_KEYS = ["enabled", "maxPromises", "maxAnchors", "anchorBudgetChars", "items"];
+  function syncContentKey(raw) {
+    const d = normalizeData(raw || {});
+    return JSON.stringify([SYNC_CONTENT_KEYS.map((k) => d[k]), d.episodes || [], d.episodeInjection, d.threads || [], d.alwaysBudgetTokens, d.elementMemory.entities, d.elementMemory.injectionEnabled, d.elementMemory.injectionPrompt, d.wiki.docs, d.wiki.injectionEnabled, d.wiki.alwaysBudgetChars, d.wiki.injectionPrompt]);
+  }
+  function mergeSyncPointers(latestRaw, synced) {
+    const next = normalizeData(latestRaw);
+    for (const key of ["ownerChatId", "lorebookId", "promiseEntryId", "anchorEntryId", "backupEntryId", "keywordEntryIds", "lastSyncAt", "lastSyncError"]) next[key] = synced[key];
+    if (synced.restrictedEntryIds || next.restrictedEntryIds) next.restrictedEntryIds = parseRecord(synced.restrictedEntryIds);
+    for (const key of ["episodeEntryIds", "threadEntryId", "threadRestrictedEntryIds"]) if (synced[key] !== undefined || next[key] !== undefined) next[key] = synced[key];
+    next.elementMemory.headerEntryId = synced.elementMemory.headerEntryId;
+    next.elementMemory.entityEntryIds = synced.elementMemory.entityEntryIds;
+    next.elementMemory.originChatId = synced.elementMemory.originChatId || next.elementMemory.originChatId;
+    next.wiki.headerEntryId = synced.wiki.headerEntryId;
+    next.wiki.alwaysEntryId = synced.wiki.alwaysEntryId;
+    next.wiki.docEntryIds = synced.wiki.docEntryIds;
+    next.wiki.originChatId = synced.wiki.originChatId || next.wiki.originChatId;
+    return next;
+  }
+  async function writeSyncResult(chat, synced) {
+    const sameChat = String(state.currentChat?.id || "") === String(chat.id);
+    const latest = await api(`chats/${encodeURIComponent(chat.id)}`);
+    const base = parseRecord(parseRecord(latest?.metadata)[DATA_KEY]);
+    const merged = mergeSyncPointers(base, synced);
+    await patchChatMetadata(chat.id, { [DATA_KEY]: merged });
+    if (sameChat) state.currentData = merged;
+    if (syncContentKey(merged) !== syncContentKey(synced)) state.syncAgain = true;
+  }
   async function syncLorebook({ silent = false } = {}) {
-    if (!state.currentChat || !state.currentData || state.syncing) return;
+    if (!state.currentChat || !state.currentData) return;
+    if (state.syncPromise) { state.syncAgain = true; return state.syncPromise; }
+    state.syncPromise = (async () => {
+      let rounds = 0;
+      do {
+        state.syncAgain = false;
+        await syncLorebookOnce({ silent: silent || rounds > 0 });
+        rounds += 1;
+      } while (state.syncAgain && rounds < 4);
+    })();
+    try { return await state.syncPromise; } finally { state.syncPromise = null; }
+  }
+  async function syncLorebookOnce({ silent = false } = {}) {
+    if (!state.currentChat || !state.currentData) return;
     if (!ownershipAllowsData()) throw new Error("격리된 기억은 로어북에 동기화할 수 없습니다.");
     await verifyOwnershipBeforePersist();
     state.syncing = true;
@@ -1724,7 +2424,7 @@ When current and historical facts differ, current facts take precedence.`;
       await attachLorebook(chat.id, book.id, detachIds);
       const rows = extractArray(await api(`lorebooks/${encodeURIComponent(book.id)}/entries`), ["entries", "items", "results"]);
 
-      const promises = activePromises(data).slice(0, data.maxPromises);
+      const promises = sharedPromises(data);
       data.promiseEntryId = await upsertEntry(
         book.id,
         rows,
@@ -1740,7 +2440,7 @@ When current and historical facts differ, current facts take precedence.`;
         }),
       );
 
-      const anchors = anchorInjectionPlan(data).selected;
+      const anchors = sharedAnchors(data);
       data.anchorEntryId = await upsertEntry(
         book.id,
         rows,
@@ -1756,8 +2456,8 @@ When current and historical facts differ, current facts take precedence.`;
         }),
       );
 
-      const keywordItems = activeKeywordAnchors(data);
-      const existingKeywordEntries = rows.filter((entry) => entry?.tag === KEYWORD_ENTRY_TAG || String(parseRecord(entry?.dynamicState).memoryCabinetItemId || "").trim());
+      const keywordItems = dedupeByTitle(activeKeywordAnchors(data)).kept;
+      const existingKeywordEntries = rows.filter((entry) => entry?.tag === KEYWORD_ENTRY_TAG || (entry?.tag !== RESTRICTED_ENTRY_TAG && String(parseRecord(entry?.dynamicState).memoryCabinetItemId || "").trim()));
       const nextMap = {};
       for (const item of keywordItems) {
         const knownId = String(data.keywordEntryIds?.[item.id] || "");
@@ -1775,6 +2475,27 @@ When current and historical facts differ, current facts take precedence.`;
         if (!entry?.id || activeIds.has(String(entry.id))) continue;
         try { await api(`lorebooks/${encodeURIComponent(book.id)}/entries/${encodeURIComponent(entry.id)}`, { method: "PATCH", body: { enabled: false } }); } catch {}
       }
+
+      const restrictedOn = data.enabled && restrictionEffective(chat);
+      const existingRestricted = rows.filter((entry) => entry?.tag === RESTRICTED_ENTRY_TAG);
+      const nextRestricted = {};
+      for (const item of restrictedInjectionItems(data)) {
+        nextRestricted[item.id] = await upsertEntry(
+          book.id,
+          rows,
+          String(parseRecord(data.restrictedEntryIds)[item.id] || ""),
+          (entry) => entry?.tag === RESTRICTED_ENTRY_TAG && String(parseRecord(entry?.dynamicState).memoryCabinetItemId || "") === item.id,
+          restrictedEntryPayload(chat, item, restrictedOn),
+        );
+      }
+      const restrictedActive = new Set(Object.values(nextRestricted).map(String));
+      for (const entry of existingRestricted) {
+        if (!entry?.id || restrictedActive.has(String(entry.id))) continue;
+        try { await api(`lorebooks/${encodeURIComponent(book.id)}/entries/${encodeURIComponent(entry.id)}`, { method: "PATCH", body: { enabled: false } }); } catch {}
+      }
+      if (Object.keys(nextRestricted).length || Object.keys(parseRecord(data.restrictedEntryIds)).length) data.restrictedEntryIds = nextRestricted;
+      await syncEpisodeEntries(book, rows, chat, data);
+      if (typeof syncLayerEntries === "function") await syncLayerEntries(book, rows, chat, data);
 
       const memory = data.elementMemory;
       memory.headerEntryId = await upsertEntry(
@@ -1879,14 +2600,13 @@ When current and historical facts differ, current facts take precedence.`;
         backupEntryPayload(chat, data),
       );
       await host.commitSync(chat.id);
-      await patchChatMetadata(chat.id, { [DATA_KEY]: data });
-      state.currentData = data;
+      await writeSyncResult(chat, data);
       state.ownershipDetachLorebookIds = [];
       if (!silent) toast("전용 로어북을 동기화했습니다.");
     } catch (error) {
       data.lastSyncError = String(error?.message || error);
-      try { await patchChatMetadata(chat.id, { [DATA_KEY]: data }); } catch {}
-      state.currentData = data;
+      try { await writeSyncResult(chat, data); } catch {}
+      state.syncAgain = false;
       if (!silent) toast(`동기화 실패: ${data.lastSyncError}`, true);
       throw error;
     } finally {
@@ -2132,9 +2852,24 @@ When current and historical facts differ, current facts take precedence.`;
       return { ...row, currentFacts, historyFacts };
     });
   }
+  // v2.1: 특정 인물에게 숨긴 메시지(extra.hiddenFromAICharacterIds)는 보관함이 읽지 않는다.
+  // 범위 개념이 없는 요소 기억·위키·일반 기록으로 옮겨지면 모든 인물에게 공개되기 때문이다.
+  function messageHiddenFromSomeone(row) {
+    return row?.role === "system" || hasCharacterConditions(row?.content) || normalizeKnownBy(parseRecord(row?.extra).hiddenFromAICharacterIds).length > 0;
+  }
+  function readableMessages(rows, where) {
+    const all = safeArray(rows).filter((row) => ['user', 'assistant'].includes(String(row?.role || '')) && String(row?.content || '').trim());
+    const kept = all.filter((row) => !messageHiddenFromSomeone(row));
+    state.hiddenSkipped = { ...parseRecord(state.hiddenSkipped), [where]: all.length - kept.length };
+    return kept;
+  }
+  function hiddenSkipNote(where) {
+    const n = Number(parseRecord(state.hiddenSkipped)[where]) || 0;
+    return n ? `특정 인물에게 숨긴 메시지 ${n}개는 읽지 않았어요.` : "";
+  }
   async function fetchElementMessages() {
     const payload = await api(`chats/${encodeURIComponent(state.selectedChatId)}/messages`);
-    return extractArray(payload, ['messages', 'items', 'results']).filter((row) => ['user', 'assistant'].includes(String(row.role || '')) && String(row.content || '').trim());
+    return readableMessages(extractArray(payload, ['messages', 'items', 'results']), 'element');
   }
   async function previewElementRange() {
     const messages = await fetchElementMessages();
@@ -2293,7 +3028,7 @@ When current and historical facts differ, current facts take precedence.`;
       toast(`${created + updated}개 저장 · ${conflicts.length}개는 최신 수정/중복 때문에 남겨뒀습니다.`, true);
     } else {
       state.elementCandidates = []; state.elementCandidateSelected.clear(); state.elementExtractInfo = null; state.elementCandidateOverflow = 0; state.layer = null;
-      toast(`요소 기억 ${created + updated}개를 저장했습니다.`);
+      toast(`요소 기억 ${created + updated}개를 저장했습니다.${syncFailSuffix()}`, !!syncFailSuffix());
     }
     render();
   }
@@ -2405,7 +3140,7 @@ When current and historical facts differ, current facts take precedence.`;
           : `<label>최근 <input id="mmc-element-turns" type="number" min="1" max="100" value="${state.elementExtractTurns}"> 턴</label>`}</div>
         <button class="mmc-btn mmc-primary" data-action="extract-elements">${SVG.spark}<span>요소 기억 추출</span></button>
       </div>
-      <small class="mmc-element-status"><i class="mmc-sync-dot ${memory.injectionEnabled ? "is-ok" : ""}"></i>주입 ${memory.injectionEnabled ? "켜짐" : "꺼짐"} · 저장된 요소 ${memory.entities.length}개 · 모델 결과는 자동 저장되지 않아요 · <button class="mmc-link" data-action="element-settings">요소 설정</button></small>
+      <small class="mmc-element-status"><i class="mmc-sync-dot ${memory.injectionEnabled ? "is-ok" : ""}"></i>주입 ${memory.injectionEnabled ? "켜짐" : "꺼짐"} · 저장된 요소 ${memory.entities.length}개 · 모델 결과는 자동 저장되지 않아요${hiddenSkipNote("element") ? ` · ${esc(hiddenSkipNote("element"))}` : ""} · <button class="mmc-link" data-action="element-settings">요소 설정</button></small>
     </section>`;
   }
 
@@ -2770,9 +3505,10 @@ When current and historical facts differ, current facts take precedence.`;
     for (const item of safeArray(normalized.items)) {
       if (item.type === "anchor" && item.archived) continue;
       if (item.type === "promise" && item.status === "cancelled") continue;
+      if (isRestrictedItem(item)) continue;
       touch(item.type === "anchor" ? "anchor" : "promise", item.id, item.title, item.content, item.updatedAt);
     }
-    for (const row of summaryRowsFromMetadata(state.currentChat?.metadata)) touch("summary", row.id, row.title || "요약", row.content, row.updatedAt || row.createdAt);
+    for (const row of summaryRowsFromMetadata(state.currentChat?.metadata)) touch("summary", row.id, row.title || "요약", stripCharacterConditionSections(row.content), row.updatedAt || row.createdAt);
     return rows.sort((a, b) => String(b.updatedAt).localeCompare(String(a.updatedAt))).slice(0, 12);
   }
   function wikiProposalFor(docId, wiki = wikiState()) {
@@ -2790,14 +3526,15 @@ When current and historical facts differ, current facts take precedence.`;
     }
     for (const item of safeArray(data.items)) {
       if (item.type === "anchor" && item.archived) continue;
+      if (isRestrictedItem(item)) continue;
       rows.push({ id: `${item.type}:${item.id}`, kind: item.type === "anchor" ? "anchor" : "promise", refId: item.id, label: item.title, text: item.content, updatedAt: item.updatedAt });
     }
     for (const row of summaryRowsFromMetadata(state.currentChat?.metadata)) {
-      rows.push({ id: `summary:${row.id}`, kind: "summary", refId: String(row.id || ""), label: String(row.title || "요약"), text: String(row.content || ""), updatedAt: String(row.updatedAt || row.createdAt || "") });
+      rows.push({ id: `summary:${row.id}`, kind: "summary", refId: String(row.id || ""), label: String(row.title || "요약"), text: stripCharacterConditionSections(row.content), updatedAt: String(row.updatedAt || row.createdAt || "") });
     }
     try {
       const payload = await api(`chats/${encodeURIComponent(state.selectedChatId)}/messages?limit=120`);
-      const messages = extractArray(payload, ["messages", "items", "results"]).filter((row) => ["user", "assistant"].includes(String(row.role || "")) && String(row.content || "").trim());
+      const messages = readableMessages(extractArray(payload, ["messages", "items", "results"]), "wiki");
       for (const row of messages.slice(-30).reverse()) {
         rows.push({ id: `message:${String(row.id || uid("wmsg"))}`, kind: "message", refId: String(row.id || ""), label: `${roleLabel(row.role)} · ${truncate(String(row.content || ""), 40)}`, text: String(row.content || ""), updatedAt: String(row.createdAt || "") });
       }
@@ -3064,7 +3801,9 @@ When current and historical facts differ, current facts take precedence.`;
     if (!proposal) { toast("적용할 만한 변경 제안이 없습니다."); return; }
     const data = await freshOwnedData();
     const nextWiki = normalizeWiki(data.wiki);
-    nextWiki.proposals = [proposal, ...nextWiki.proposals.filter((row) => row.docId !== doc.id)].slice(0, 40);
+    const keptProposals = [proposal, ...nextWiki.proposals.filter((row) => row.docId !== doc.id)];
+    if (keptProposals.length > 40) toast(`변경 제안은 최대 40건까지 보관해요. 가장 오래된 제안 ${keptProposals.length - 40}건이 목록에서 빠졌습니다.`, true);
+    nextWiki.proposals = keptProposals.slice(0, 40);
     data.wiki = nextWiki;
     await persistData(data, { sync: false, silent: true });
     state.rawRecovery = null;
@@ -3534,6 +4273,7 @@ When current and historical facts differ, current facts take precedence.`;
       <header><div><span class="mmc-kicker">WIKI DRAFT</span><h3>기존 기억으로 위키 초안 만들기</h3><small>새 기억을 만들지 않습니다. 고른 기억을 문서로 조직하고 [n] 근거를 연결합니다.</small></div><button class="mmc-icon-btn" data-action="close-layer">${SVG.close}</button></header>
       <div class="mmc-layer-body">
         <label class="mmc-field"><span>주제 <small>선택 · 비워 두면 모델이 알아서 나눕니다</small></span><input id="mmc-wiki-draft-topic" value="${esc(state.wikiDraftTopic)}" maxlength="120" placeholder="예: 이준이라는 인물 / 학교 건물"></label>
+        ${hiddenSkipNote("wiki") ? `<div class="mmc-candidate-note">${esc(hiddenSkipNote("wiki"))} 일부 인물만 아는 기억과 요약의 인물별 구간도 위키 근거에서 뺐어요.</div>` : ""}
         <div class="mmc-source-toolbar"><button class="mmc-btn" data-action="wiki-source-all">전체 선택</button><button class="mmc-btn" data-action="wiki-source-none">해제</button><span>${state.wikiSourceSelected.size}개 선택 · 약 ${estimateTokens(selectedText)} tokens</span></div>
         <div class="mmc-source-list">${body || '<div class="mmc-empty">초안의 근거로 쓸 기억이 없습니다. 먼저 약속·앵커·요소 기억을 만들어 주세요.</div>'}</div>
         <section class="mmc-model-strip"><div><b>위키 초안 모델</b><small>고른 기억만 근거로 씁니다. 결과는 미리보기이며 선택 저장 전에는 보관되지 않습니다.</small></div><select id="mmc-wiki-draft-model">${wikiConnectionOptions(wiki)}</select></section>
@@ -4018,6 +4758,8 @@ When current and historical facts differ, current facts take precedence.`;
       overview: 0,
       promise: rows.filter((item) => item.type === "promise" && item.status === "active").length,
       anchor: rows.filter((item) => item.type === "anchor").length,
+      episode: liveEpisodes().length,
+      thread: threadList().filter((t) => threadInjectable(t.status)).length,
       element: elementMemory().entities.length,
       wiki: wikiState().docs.length,
     };
@@ -4026,7 +4768,9 @@ When current and historical facts differ, current facts take precedence.`;
     return [
       { id: "overview", label: "개요", short: "개요", icon: SVG.overview },
       { id: "promise", label: "약속", short: "약속", icon: SVG.promise },
+      { id: "thread", label: "진행 흐름", short: "흐름", icon: SVG.flow },
       { id: "anchor", label: "기억 앵커", short: "앵커", icon: SVG.anchor },
+      { id: "episode", label: "장면 기억", short: "장면", icon: SVG.scene },
       { id: "element", label: "요소 기억", short: "요소", icon: SVG.element },
       { id: "wiki", label: "이야기 위키", short: "위키", icon: SVG.wiki },
     ];
@@ -4042,7 +4786,16 @@ When current and historical facts differ, current facts take precedence.`;
       const modeText = advanced ? "고급 메모리 보호 모드 · 수동 확인" : (SUMMARY_UPDATE_MODE_LABEL[state.summaryUpdateMode] || "알림 + 모델 정리 버튼");
       const actions = [["review-pending", "내용 확인", "", false]];
       if (state.summaryUpdateMode !== "notify_only") actions.push(["review-model", "모델로 정리", "", true]);
-      rows.push({ tone: "accent", title: `새 요약 ${state.pendingSummaryRows.length}개 · 기억 갱신이 필요해요`, sub: `${modeText} · 요약은 아직 약속·앵커에 반영되지 않았어요`, actions });
+      const sceneCount = amRowsPending(state.pendingSummaryRows).length;
+      const plainCount = state.pendingSummaryRows.length - sceneCount;
+      const label = [plainCount ? `새 요약 ${plainCount}개` : "", sceneCount ? `새 장면 요약 ${sceneCount}개` : ""].filter(Boolean).join(" · ");
+      rows.push({ tone: "accent", title: `${label} · 기억 갱신이 필요해요`, sub: `${modeText} · 아직 약속·앵커에 반영되지 않았어요`, actions });
+    }
+    if (safeArray(state.staleRecords).length) rows.push({ tone: "warn", title: `근거가 바뀐 기억 ${state.staleRecords.length}개`, sub: "근거 요약·장면·메시지가 바뀌었거나 지워졌어요 · 기억은 그대로 들어가는 중이에요", actions: [["stale-open", "확인", "", true]] });
+    const held = branchHoldCount(data.branchHold);
+    if (held) {
+      const hold = normalizeBranchHold(data.branchHold);
+      rows.push({ tone: "warn", title: `분기 확인 대기 ${held}개`, sub: `분기 시점(${sourceDate(hold.cutAt) || "알 수 없음"}) 뒤에 부모 RP에서 생기거나 바뀐 기록이에요 · 이 분기에는 아직 넣지 않았어요`, actions: [["branch-hold-open", "확인", "", true]] });
     }
     const undo = data.lastAutoReviewUndo;
     if (undo) {
@@ -4054,6 +4807,9 @@ When current and historical facts differ, current facts take precedence.`;
       const doc = wiki.docs.find((row) => row.id === proposal.docId);
       rows.push({ tone: "accent2", title: `위키 ‘${truncate(doc?.title || proposal.docTitle || "문서", 24)}’ 변경 제안 ${proposal.changes.length}건`, sub: `새 기억 ${proposal.sourceCount}건 기준${proposal.conflicts.length ? ` · 잠금 충돌 ${proposal.conflicts.length}건` : ""}`, actions: [["wiki-proposal-open", "보기", proposal.docId, false]] });
     }
+    const fullPlan = injectionPlan(data);
+    if (fullPlan.duplicates.length) rows.push({ tone: "muted", title: `제목이 같은 기록 ${fullPlan.duplicates.length}개는 하나만 넣고 있어요`, sub: "같은 일이 두 번 들어가지 않게 최신·중요한 쪽만 넣어요 · 합치거나 정리하려면 해당 탭에서 고쳐 주세요", actions: [["tab", "앵커 보기", "anchor", false]] });
+    if (fullPlan.capHeld.length) rows.push({ tone: "warn", title: `총 상한 때문에 ${fullPlan.capHeld.length}개가 대기 중`, sub: "중요가 아닌 오래된 기록부터 대기로 돌렸어요 · 지워지지는 않아요", actions: [["settings", "상한 보기", "", false]] });
     const plan = anchorInjectionPlan();
     if (plan.excluded.length) rows.push({ tone: "warn", title: `앵커 ${plan.excluded.length}개가 예산 때문에 대기 중`, sub: `항상 기억 ${plan.used.toLocaleString()} / ${plan.budget.toLocaleString()}자 · 지워지지는 않아요`, actions: [["tab", "앵커 보기", "anchor", false]] });
     const keywordless = safeArray(data.items).filter((item) => item.type === "anchor" && item.active && !item.archived && item.activation === "keyword" && !safeArray(item.keywords).length).length;
@@ -4073,7 +4829,8 @@ When current and historical facts differ, current facts take precedence.`;
   function injectionSummary() {
     const data = state.currentData;
     const chat = state.currentChat;
-    const promises = activePromises().slice(0, data.maxPromises);
+    const promises = sharedPromises(data);
+    const restricted = restrictedInjectionItems(data);
     const plan = anchorInjectionPlan();
     const wiki = wikiState();
     const wikiAlways = wiki.injectionEnabled ? wikiAlwaysDocs(wiki) : [];
@@ -4083,8 +4840,10 @@ When current and historical facts differ, current facts take precedence.`;
     const wikiConds = wiki.docs.filter((doc) => wikiDocInjectable(doc, wiki)).length;
     const parts = [
       { id: "promise", label: "약속 · 진행 중", count: promises.length, text: promises.length ? promiseContext(chat, data) : "" },
-      { id: "anchor", label: "항상 앵커", count: plan.selected.length, text: plan.selected.length ? anchorContext(chat, data) : "" },
+      { id: "anchor", label: "항상 앵커", count: sharedAnchors(data).length, text: sharedAnchors(data).length ? anchorContext(chat, data) : "" },
+      { id: "thread", label: "진행 흐름", count: injectionPlan(data).threads.length, text: threadContext(chat, data) },
       { id: "wiki", label: "위키 개요", count: wikiAlways.length, text: wikiAlways.length ? wikiAlwaysContext(chat, wiki) : "" },
+      ...(restricted.length ? [{ id: "restricted", label: restrictionEffective() ? "일부 인물만 아는 기억" : "일부 인물만 아는 기억 (병합 그룹이라 넣지 않음)", count: restricted.length, text: restrictionEffective() ? restricted.map((item) => restrictedContext(chat, item)).join("\n\n") : "" }] : []),
     ].map((part) => ({ ...part, tokens: part.text ? estimateTokens(part.text) : 0 }));
     return { parts, total: parts.reduce((sum, part) => sum + part.tokens, 0), keywordAnchors, elementConds, wikiConds, conditional: keywordAnchors + elementConds + wikiConds, plan };
   }
@@ -4166,6 +4925,12 @@ When current and historical facts differ, current facts take precedence.`;
     const schedule = item.scheduleText ? ` / 예정: ${truncate(item.scheduleText, 90)}` : "";
     return `- ${item.priority === "high" ? "[중요] " : ""}${truncate(item.title, 90)}: ${truncate(item.content, 320)}${schedule}`;
   }
+  function scopeChip(item) {
+    if (!isRestrictedItem(item)) return "";
+    const held = !restrictionEffective();
+    return `<span class="mmc-chip ${held ? "is-warn" : "is-soft"}" title="${held ? "병합 그룹 응답이라 넣지 않아요" : "이 인물이 응답할 때만 들어가요"}">아는 인물 · ${esc(truncate(knownByLabel(item.knownBy), 24))}${held ? " · 대기" : ""}</span>`;
+  }
+
   function promiseRow(item, index = 0) {
     const checked = item.status === "done";
     const selected = item.id === state.promiseSelectedId;
@@ -4173,6 +4938,7 @@ When current and historical facts differ, current facts take precedence.`;
       item.scheduleText ? `<span class="mmc-chip">${esc(truncate(item.scheduleText, 28))}</span>` : "",
       item.status !== "active" ? `<span class="mmc-chip is-${item.status}">${esc(PROMISE_STATUS_LABEL[item.status] || item.status)}${item.status === "done" && item.updatedAt ? ` · ${esc(sourceDate(item.updatedAt).split(" ")[0] || "")}` : ""}</span>` : "",
       item.sourceType === "summary" || item.sourceType === "model" ? '<span class="mmc-chip is-soft">요약에서</span>' : item.sourceType === "manual" ? '<span class="mmc-chip is-soft">직접 추가</span>' : "",
+      scopeChip(item),
     ].join("");
     return `<article class="mmc-ticket prio-${esc(item.priority || "normal")} is-${esc(item.status)} ${selected ? "is-selected" : ""}" data-item-id="${esc(item.id)}">
       <button class="mmc-check ${checked ? "is-checked" : ""}" data-action="toggle-promise-done" data-id="${esc(item.id)}" title="${checked ? "다시 진행 중" : "완료로 표시"}" aria-label="${checked ? "다시 진행 중" : "완료로 표시"}">${checked ? "✓" : ""}</button>
@@ -4188,8 +4954,8 @@ When current and historical facts differ, current facts take precedence.`;
 
   function anchorRow(item) {
     const checked = item.active && !item.archived;
-    const plan = anchorInjectionPlan();
-    const injectedAlways = item.activation !== "always" || plan.selected.some((row) => row.id === item.id);
+    const plan = injectionPlan();
+    const injectedAlways = item.activation !== "always" || plan.anchors.some((row) => row.id === item.id);
     const mode = item.archived ? "보관" : !item.active ? "꺼짐" : item.activation === "keyword" ? (safeArray(item.keywords).length ? "키워드" : "키워드 없음") : injectedAlways ? "주입 중" : "예산 대기";
     const lifespan = ANCHOR_LIFESPAN_LABEL[item.lifespan] || ANCHOR_LIFESPAN_LABEL.permanent;
     const evidence = item.sourceQuote || safeArray(item.sourceIds).length;
@@ -4201,7 +4967,7 @@ When current and historical facts differ, current facts take precedence.`;
         <b>${esc(displayText(item.title, item.titleKo))}</b>
         <small>${esc(truncate(displayText(item.content, item.contentKo), 150))}</small>
         ${keywords}
-        <span class="mmc-chips"><span class="mmc-chip">${esc(ANCHOR_CATEGORY_LABEL[item.category] || "기억")}</span><span class="mmc-chip ${wait || mode === "키워드 없음" ? "is-warn" : mode === "주입 중" || mode === "키워드" ? "is-ok" : ""}">${mode}</span><span class="mmc-chip is-soft">${esc(lifespan)}</span>${item.priority === "high" ? '<span class="mmc-chip is-high">중요</span>' : ""}</span>
+        <span class="mmc-chips"><span class="mmc-chip">${esc(ANCHOR_CATEGORY_LABEL[item.category] || "기억")}</span><span class="mmc-chip ${wait || mode === "키워드 없음" ? "is-warn" : mode === "주입 중" || mode === "키워드" ? "is-ok" : ""}">${mode}</span><span class="mmc-chip is-soft">${esc(lifespan)}</span>${item.priority === "high" ? '<span class="mmc-chip is-high">중요</span>' : ""}${scopeChip(item)}</span>
       </button>
       <span class="mmc-anchor-side">${evidence ? `<button class="mmc-evidence-link" data-action="view-evidence" data-kind="item" data-id="${esc(item.id)}">근거</button>` : ""}<button class="mmc-mini" data-action="anchor-move" data-id="${esc(item.id)}" title="${item.activation === "keyword" ? "항상 기억으로 옮기기" : "키워드로 떠오름으로 옮기기"}">${item.activation === "keyword" ? "항상으로" : "키워드로"}</button></span>
     </article>`;
@@ -4308,7 +5074,9 @@ When current and historical facts differ, current facts take precedence.`;
     const advanced = advancedMemoryEnabled();
     const modelButton = state.summaryUpdateMode === "notify_only" ? "" : `<button class="mmc-btn mmc-sm mmc-model-btn" data-action="review-model">${SVG.spark}<span>모델로 통합 정리</span></button>`;
     const modeText = advanced ? "고급 메모리 보호 모드 · 자동 처리 없이 수동 확인" : (SUMMARY_UPDATE_MODE_LABEL[state.summaryUpdateMode] || "알림 + 모델 정리 버튼");
-    return `<section class="mmc-summary-alert"><span class="mmc-alert-icon">${SVG.inbox}</span><div><b>새 요약 ${count}개 · 기억 갱신이 필요해요</b><small>${esc(modeText)} · 요약 내용은 아직 약속/앵커에 반영되지 않았어요.</small></div><div><button class="mmc-btn mmc-sm" data-action="review-pending">내용 확인</button>${modelButton}</div></section>`;
+    const sceneCount = amRowsPending(state.pendingSummaryRows).length;
+    const label = [count - sceneCount ? `새 요약 ${count - sceneCount}개` : "", sceneCount ? `새 장면 요약 ${sceneCount}개` : ""].filter(Boolean).join(" · ");
+    return `<section class="mmc-summary-alert"><span class="mmc-alert-icon">${SVG.inbox}</span><div><b>${esc(label)} · 기억 갱신이 필요해요</b><small>${esc(modeText)} · 요약 내용은 아직 약속/앵커에 반영되지 않았어요.</small></div><div><button class="mmc-btn mmc-sm" data-action="review-pending">내용 확인</button>${modelButton}</div></section>`;
   }
 
 
@@ -4324,15 +5092,32 @@ When current and historical facts differ, current facts take precedence.`;
   async function refreshAgentNotice() {}
   function agentNoticeBanner() { return ""; }
 
+  function advancedMemorySettingsCap() {
+    const fromStatus = Number(parseRecord(state.sceneSettings).maxContextTokens);
+    const fromMeta = Number(parseRecord(parseRecord(state.currentChat?.metadata).advancedMemory).maxContextTokens);
+    const value = Number.isFinite(fromStatus) && fromStatus > 0 ? fromStatus : Number.isFinite(fromMeta) && fromMeta > 0 ? fromMeta : 0;
+    return value;
+  }
   function advancedMemoryBanner() {
     if (!advancedMemoryEnabled()) return "";
-    return `<section class="mmc-advanced-memory-note"><span class="mmc-alert-icon">${SVG.info}</span><div><b>고급 메모리 사용 중</b><small>순정 자동요약 대신 고급 메모리가 문맥을 관리합니다. 실제로 생성된 summaryEntries는 계속 수동 검토할 수 있고, 요소 원문 추출도 그대로 쓸 수 있어요.</small></div></section>`;
+    const info = injectionSummary();
+    const cap = advancedMemorySettingsCap();
+    const share = cap ? ` · 고급 메모리 문맥 상한 ${cap.toLocaleString()} 중 약 ${Math.max(1, Math.round((info.total / cap) * 1000) / 10)}%` : "";
+    const scenes = state.amSceneError ? "장면 요약을 읽지 못해 장면 후보는 쉬고 있어요." : `완료된 장면 요약 ${state.amSceneRows.length}개를 약속·앵커 후보 소스로 읽을 수 있어요(읽기만 해요).`;
+    return `<section class="mmc-advanced-memory-note"><span class="mmc-alert-icon">${SVG.info}</span><div><b>고급 메모리 사용 중</b><small>순정 자동 요약 대신 고급 메모리가 문맥을 관리합니다. ${esc(scenes)}</small><small>보관함이 매 턴 넣는 기억 약 ${info.total.toLocaleString()} tokens${esc(share)}는 고급 메모리가 살려 둘 최근 대화·회수 장면 예산에서 먼저 빠집니다. 고급 메모리와 순정 Memory Recall은 함께 켜지지 않으며, 보관함은 둘의 설정을 바꾸지 않아요.</small></div></section>`;
+  }
+  function restrictedModeBanner() {
+    const data = state.currentData;
+    if (!data || restrictionEffective()) return "";
+    const held = safeArray(data.items).filter((item) => isRestrictedItem(item) && (item.type === "promise" ? item.status === "active" : item.active && !item.archived)).length;
+    if (!held) return "";
+    return `<section class="mmc-advanced-memory-note is-warn"><span class="mmc-alert-icon">${SVG.lock}</span><div><b>일부 인물만 아는 기억 ${held}개를 넣지 않고 있어요</b><small>이 그룹은 병합(Merged) 응답이라 모든 인물이 한 프롬프트를 함께 봅니다. 인물별로 가려 넣을 수 없어 비밀이 새지 않게 주입을 멈췄어요. 그룹 응답 방식을 개별(Individual)로 바꾸면 해당 인물에게만 들어갑니다.</small></div></section>`;
   }
 
 
   // 개요 탭은 요약·되돌리기 알림을 '검토 대기' 카드에 모아 보여 준다. 다른 탭은 해야 할 일만 띠로 보여 준다.
   function statusBanners() {
-    if (state.activeTab === "overview") return `${advancedMemoryBanner()}${agentNoticeBanner()}`;
+    if (state.activeTab === "overview") return `${advancedMemoryBanner()}${restrictedModeBanner()}${agentNoticeBanner()}`;
     return `${pendingSummaryBanner()}${autoUndoBanner()}`;
   }
 
@@ -4356,6 +5141,8 @@ When current and historical facts differ, current facts take precedence.`;
     if (state.activeTab === "element") return `<div data-mmc-summary-alert-slot>${statusBanners()}</div>${elementMainView()}`;
     if (state.activeTab === "wiki") return `<div data-mmc-summary-alert-slot>${statusBanners()}</div>${wikiMainView()}`;
     if (state.activeTab === "anchor") return anchorView();
+    if (state.activeTab === "episode") return episodeView();
+    if (state.activeTab === "thread") return threadView();
     return promiseView();
   }
 
@@ -4398,7 +5185,1028 @@ When current and historical facts differ, current facts take precedence.`;
   }
 
 
+  // ──────────────────────────────────────────────
+  // v2.1 장면 기억(구조화 기억)
+  // [배경] 날짜·시간대·장소 · [사건] 개요·참여 인물·핵심 행동/대사 · [사실] 내용·아는 인물·유효 상태 · [인물] 행동·관계 변화·감정/태도 변화
+  // 따로 모델을 부르지 않는다. 기존 '새 요약/장면 검토'와 '원문에서 정리' 호출 한 번에서 약속·앵커와 함께 받는다.
+  // 같은 근거가 바뀌어 새로 정리되면 옛 장면 기억은 지우지 않고 '지난 판'으로 남긴다.
+  // ──────────────────────────────────────────────
+  const EPISODE_LIMIT = 600;
+  const EPISODE_ENTRY_TAG = "memory-cabinet-episode";
+  const EPISODE_MARKER = "§MEMORY_CABINET_EPISODE_V1§";
+  const FACT_STATUS_LABEL = { current: "현재", superseded: "지난 사실", uncertain: "불확실" };
+  const EPISODE_CONTRACT = [
+    "Structured scene records (fixed by the extension):",
+    "- In the same JSON array you may add up to 3 objects with kind=\"episode\" (they have no type/action field), one per distinct scene in the source. Skip a scene already listed in RECENT EPISODES unless the source clearly changed it.",
+    "- Shape: {\"kind\":\"episode\",\"title\":\"...\",\"keywords\":[\"0-6 distinctive words that would bring this scene back\"],\"background\":{\"date\":\"in-story date or empty\",\"timeOfDay\":\"...\",\"place\":\"...\"},\"event\":{\"summary\":\"what happened\",\"participants\":[\"names\"],\"keyActions\":[\"key actions or short quoted lines\"],\"knownBy\":[\"names\"]|[\"all\"]},\"facts\":[{\"text\":\"a fact that follows from the scene\",\"knownBy\":[\"names\"]|[\"all\"],\"status\":\"current|superseded|uncertain\"}],\"characters\":[{\"name\":\"...\",\"actions\":\"...\",\"relationChange\":\"...\",\"attitudeChange\":\"...\"}]}",
+    "- Keep who-knows-what: event.knownBy is who witnessed or learned of the scene; each fact has its own knownBy. Never mark a restricted fact as all.",
+    "- Do not copy promises or anchors into facts. Write in the source language.",
+  ].join("\n");
+
+  function normalizeEpisodeFact(value = {}) {
+    const raw = isRecord(value) ? value : { text: String(value || "") };
+    const text = String(raw.text || "").trim().slice(0, 300);
+    if (!text) return null;
+    return { id: String(raw.id || uid("epf")), text, status: Object.prototype.hasOwnProperty.call(FACT_STATUS_LABEL, raw.status) ? raw.status : "current", ...(normalizeKnownBy(raw.knownBy).length ? { knownBy: normalizeKnownBy(raw.knownBy) } : {}) };
+  }
+  function normalizeEpisodeCharacter(value = {}) {
+    const raw = parseRecord(value);
+    const name = String(raw.name || "").trim().slice(0, 80);
+    if (!name) return null;
+    return { name, actions: String(raw.actions || "").trim().slice(0, 240), relationChange: String(raw.relationChange || "").trim().slice(0, 240), attitudeChange: String(raw.attitudeChange || "").trim().slice(0, 240) };
+  }
+  function normalizeEpisode(value = {}) {
+    const raw = parseRecord(value);
+    const title = String(raw.title || "").trim().replace(/\s+/g, " ").slice(0, 120);
+    if (!title) return null;
+    const bg = parseRecord(raw.background); const ev = parseRecord(raw.event);
+    return {
+      id: String(raw.id || uid("ep")),
+      title,
+      keywords: normalizeTextList(raw.keywords, 8, 60),
+      background: { date: String(bg.date || "").trim().slice(0, 80), timeOfDay: String(bg.timeOfDay || "").trim().slice(0, 40), place: String(bg.place || "").trim().slice(0, 120) },
+      event: { summary: String(ev.summary || "").trim().slice(0, 800), participants: normalizeTextList(ev.participants, 12, 80), keyActions: normalizeTextList(ev.keyActions, 8, 240), ...(normalizeKnownBy(ev.knownBy).length ? { knownBy: normalizeKnownBy(ev.knownBy) } : {}) },
+      facts: safeArray(raw.facts).map(normalizeEpisodeFact).filter(Boolean).slice(0, 16),
+      characters: safeArray(raw.characters).map(normalizeEpisodeCharacter).filter(Boolean).slice(0, 10),
+      sourceIds: normalizeTextList(raw.sourceIds, 24, 160),
+      ...(Object.keys(normalizeSourceFingerprints(raw.sourceFingerprints)).length ? { sourceFingerprints: normalizeSourceFingerprints(raw.sourceFingerprints) } : {}),
+      at: String(raw.at || ""),
+      msgIndex: Number(raw.msgIndex) || 0,
+      ...(raw.replacedBy ? { replacedBy: String(raw.replacedBy) } : {}),
+      ...(raw.sourceCandidateId ? { sourceCandidateId: String(raw.sourceCandidateId) } : {}),
+      createdAt: String(raw.createdAt || nowIso()),
+      updatedAt: String(raw.updatedAt || raw.createdAt || nowIso()),
+    };
+  }
+  function episodeList(data = state.currentData) { return safeArray(parseRecord(data).episodes).map(normalizeEpisode).filter(Boolean); }
+  function liveEpisodes(data = state.currentData) { return episodeList(data).filter((ep) => !ep.replacedBy); }
+  function episodeInjectionOn(data) { return parseRecord(data).episodeInjection !== false; }
+  function episodeTimeLine(ep) { return [ep.background.date, ep.background.timeOfDay, ep.background.place].filter(Boolean).join(" · "); }
+
+  // ── 후보 ──
+  function episodeScopeOf(obj, stored) {
+    if (stored) return { knownByIds: normalizeKnownBy(obj.knownByIds), scopeUnknown: safeArray(obj.scopeUnknown), scopeConfirmed: obj.scopeConfirmed === true };
+    const rawList = Array.isArray(obj.knownBy) ? obj.knownBy : typeof obj.knownBy === "string" && obj.knownBy.trim() ? [obj.knownBy] : [];
+    const resolved = resolveCharacterRefs(rawList.filter((v) => String(v).trim().toLocaleLowerCase() !== "all"));
+    return { knownByIds: [...resolved.ids, ...resolved.unknown], scopeUnknown: resolved.unknown, scopeConfirmed: false };
+  }
+  function normalizeEpisodeCandidate(row) {
+    if (!isRecord(row)) return null;
+    const stored = row.__episodeCandidate === true;
+    const base = normalizeEpisode({ ...row, event: { ...parseRecord(row.event), summary: parseRecord(row.event).summary || row.summary }, facts: safeArray(row.facts).map((f) => (isRecord(f) ? { ...f, knownBy: [] } : f)) });
+    if (!base) return null;
+    const ev = parseRecord(row.event);
+    const rawFacts = safeArray(row.facts).map((f) => (isRecord(f) ? f : { text: String(f || "") })).filter((f) => String(f.text || "").trim()).slice(0, 16);
+    return {
+      __episodeCandidate: true,
+      candidateId: String(row.candidateId || uid("epc")),
+      title: base.title, keywords: base.keywords, background: base.background, characters: base.characters,
+      event: { summary: base.event.summary, participants: base.event.participants, keyActions: base.event.keyActions, ...episodeScopeOf(ev, stored) },
+      facts: rawFacts.map((f, i) => ({ id: String(f.id || base.facts[i]?.id || uid("epf")), text: String(f.text).trim().slice(0, 300), status: Object.prototype.hasOwnProperty.call(FACT_STATUS_LABEL, f.status) ? f.status : "current", ...episodeScopeOf(f, stored) })),
+      scopeNeedsReview: row.scopeNeedsReview === true,
+      replacesEpisodeIds: normalizeTextList(row.replacesEpisodeIds, 12, 80),
+      duplicateOfEpisode: String(row.duplicateOfEpisode || ""),
+    };
+  }
+  function episodeScopeBlocks(cand) {
+    if ([cand?.event, ...safeArray(cand?.facts)].some(part => safeArray(part?.scopeUnknown).length && part.scopeConfirmed !== true)) return true;
+    if (!cand?.scopeNeedsReview) return false;
+    return [cand.event, ...safeArray(cand.facts)].some((part) => part && !normalizeKnownBy(part.knownByIds).length && part.scopeConfirmed !== true);
+  }
+  function batchSourceTime(rows) {
+    let best = "";
+    for (const row of safeArray(rows)) { const t = String(row?.updatedAt || row?.createdAt || ""); if (t && t > best) best = t; }
+    return best;
+  }
+  // 같은 근거에서 나온 기존 장면 기억과의 관계: 근거가 그대로면 중복, 근거가 바뀌었으면 교체 후보.
+  function relateEpisodeCandidates(cands, batchFps) {
+    const keys = Object.keys(batchFps);
+    const existing = liveEpisodes();
+    for (const cand of cands) {
+      const same = []; const changed = [];
+      for (const ep of existing) {
+        const fps = normalizeSourceFingerprints(ep.sourceFingerprints);
+        const overlap = keys.filter((key) => key in fps);
+        if (!overlap.length) continue;
+        if (overlap.every((key) => fps[key] === batchFps[key])) same.push(ep); else changed.push(ep);
+      }
+      const titleSame = same.find((ep) => titleKey(ep.title) === titleKey(cand.title));
+      if (titleSame || (same.length && keys.length === 1 && !changed.length)) cand.duplicateOfEpisode = (titleSame || same[0]).id;
+      if (changed.length) cand.replacesEpisodeIds = changed.map((ep) => ep.id);
+    }
+  }
+  function extractEpisodeCandidates(rawRows, sourceRows, mode) {
+    const cands = safeArray(rawRows).filter((row) => isRecord(row) && (row.kind === "episode" || row.type === "episode")).map(normalizeEpisodeCandidate).filter(Boolean).slice(0, 6);
+    if (mode === "summaries" && batchHasRestricted(sourceRows)) cands.forEach((cand) => { cand.scopeNeedsReview = true; });
+    relateEpisodeCandidates(cands, sourceFingerprintsForRows(sourceRows, mode));
+    return cands;
+  }
+  function preselectEpisodes(cands) {
+    return new Set(cands.map((cand, i) => (episodeScopeBlocks(cand) || cand.duplicateOfEpisode ? null : String(i))).filter(Boolean));
+  }
+  function recentEpisodesForPrompt() {
+    const rows = liveEpisodes().slice(-8).map((ep) => `- ${ep.title}${episodeTimeLine(ep) ? ` (${episodeTimeLine(ep)})` : ""}`);
+    return rows.length ? `\n\n[RECENT EPISODES — already recorded]\n${rows.join("\n")}\n[/RECENT EPISODES]` : "";
+  }
+  // 고른 장면 후보를 data에 넣는다. 범위 확인이 필요한 것과 상한을 넘는 것은 남긴다.
+  function applyEpisodeCandidates(data, cands, selected, { fps = {}, sourceIds = [], rows = [] } = {}) {
+    const out = { applied: 0, held: [], capped: 0, createdIds: [] };
+    const list = safeArray(data.episodes).map(normalizeEpisode).filter(Boolean);
+    const at = batchSourceTime(rows);
+    const msgIndex = Math.max(0, ...safeArray(rows).map((row) => Number(row?.endIndex) || 0));
+    const now = nowIso();
+    cands.forEach((cand, i) => {
+      if (!selected.has(String(i))) return;
+      if (episodeScopeBlocks(cand)) { out.held.push(i); return; }
+      if (list.some((ep) => ep.sourceCandidateId === cand.candidateId)) { out.applied += 1; return; }
+      if (list.filter((ep) => !ep.replacedBy).length >= EPISODE_LIMIT) { out.capped += 1; out.held.push(i); return; }
+      const episode = normalizeEpisode({
+        id: uid("ep"), title: cand.title, keywords: cand.keywords, background: cand.background, characters: cand.characters,
+        event: { summary: cand.event.summary, participants: cand.event.participants, keyActions: cand.event.keyActions, knownBy: cand.event.knownByIds },
+        facts: cand.facts.map((f) => ({ id: f.id, text: f.text, status: f.status, knownBy: f.knownByIds })),
+        sourceIds, sourceFingerprints: fps, at, msgIndex, sourceCandidateId: cand.candidateId, createdAt: now, updatedAt: now,
+      });
+      for (const old of list) if (cand.replacesEpisodeIds.includes(old.id) && !old.replacedBy) { old.replacedBy = episode.id; old.updatedAt = now; }
+      list.push(episode);
+      out.createdIds.push(episode.id);
+      out.applied += 1;
+    });
+    data.episodes = list;
+    return out;
+  }
+
+  // ── 주입 ──
+  function factCoveredByItems(text, data) {
+    const key = titleKey(text);
+    if (key.length < 6) return false;
+    return safeArray(data.items).some((item) => injectableItem(item) && titleKey(`${item.title}${item.content}`).includes(key));
+  }
+  function episodeEntryPlans(chat, data) {
+    const plans = [];
+    if (!episodeInjectionOn(data)) return plans;
+    const effective = restrictionEffective(chat);
+    for (const ep of liveEpisodes(data)) {
+      const keys = normalizeTextList([...ep.keywords, ep.background.place], 8, 60).filter((key) => key.length >= 2);
+      if (!keys.length) continue;
+      const eventScope = normalizeKnownBy(ep.event.knownBy);
+      const current = ep.facts.filter((fact) => fact.status === "current" && !factCoveredByItems(fact.text, data));
+      const groups = new Map();
+      const publicFacts = [];
+      for (const fact of current) {
+        const scope = normalizeKnownBy(fact.knownBy);
+        if (!scope.length) { publicFacts.push(fact); continue; }
+        const key = scope.slice().sort().join(",");
+        if (!groups.has(key)) groups.set(key, { scope, facts: [] });
+        groups.get(key).facts.push(fact);
+      }
+      const head = `[장면 기억 · ${truncate(ep.title, 80)}]${episodeTimeLine(ep) ? ` ${episodeTimeLine(ep)}` : ""}`;
+      const mainLines = [EPISODE_MARKER, head];
+      if (ep.event.summary) mainLines.push(`- 있었던 일: ${truncate(ep.event.summary, 260)}`);
+      for (const fact of publicFacts.slice(0, 6)) mainLines.push(`- 지금도 유효한 사실: ${truncate(fact.text, 200)}`);
+      if (eventScope.length) mainLines.splice(2, 0, `이 장면은 ${knownByLabel(eventScope)}만 알고 있다. 모르는 인물이 알고 있는 것처럼 굴게 하지 마라.`);
+      mainLines.push("이미 일어난 일이다. 관련될 때만 자연스럽게 반영하고 목록을 낭독하지 마라.");
+      plans.push({ episodeId: ep.id, scopeKey: "main", keys, scope: eventScope, content: mainLines.join("\n"), enabled: !eventScope.length || effective, title: ep.title });
+      for (const [key, group] of groups) {
+        const scope = eventScope.length ? group.scope.filter((id) => eventScope.includes(id)) : group.scope;
+        if (!scope.length) continue;
+        plans.push({ episodeId: ep.id, scopeKey: key, keys, scope, title: ep.title, enabled: effective,
+          content: [EPISODE_MARKER, head, `아래 사실은 ${knownByLabel(scope)}만 알고 있다. 모르는 인물이 알고 있는 것처럼 굴게 하지 마라.`, ...group.facts.slice(0, 6).map((fact) => `- ${truncate(fact.text, 200)}`)].join("\n") });
+      }
+    }
+    return plans;
+  }
+  function episodeEntryPayload(chat, plan, dataEnabled) {
+    return {
+      name: `장면 기억 · ${truncate(plan.title, 100)}${plan.scopeKey === "main" ? "" : " · 일부만 앎"}`,
+      content: plan.content,
+      description: `기억 보관함 장면 기억 · episode:${plan.episodeId}`,
+      keys: plan.keys, secondaryKeys: [], enabled: dataEnabled && plan.enabled,
+      constant: false, selective: false, probability: null, scanDepth: null,
+      matchWholeWords: false, caseSensitive: false, useRegex: false,
+      position: 0, depth: 4, order: 47, role: "system",
+      preventRecursion: true, excludeRecursion: false, delayUntilRecursion: false, excludeFromVectorization: true,
+      tag: EPISODE_ENTRY_TAG,
+      dynamicState: { memoryCabinetChatId: String(chat.id), memoryCabinetEpisodeId: plan.episodeId, memoryCabinetScope: plan.scopeKey, managedBy: LOREBOOK_TAG, kind: "episode" },
+      ...(plan.scope.length ? { characterFilterMode: "include", characterFilterIds: plan.scope } : { characterFilterMode: "any", characterFilterIds: [] }),
+    };
+  }
+  async function syncEpisodeEntries(book, rows, chat, data) {
+    const existing = rows.filter((entry) => entry?.tag === EPISODE_ENTRY_TAG);
+    const known = parseRecord(data.episodeEntryIds);
+    const next = {};
+    for (const plan of episodeEntryPlans(chat, data)) {
+      const mapKey = `${plan.episodeId}|${plan.scopeKey}`;
+      next[mapKey] = await upsertEntry(book.id, rows, String(known[mapKey] || ""), (entry) => {
+        const ds = parseRecord(entry?.dynamicState);
+        return entry?.tag === EPISODE_ENTRY_TAG && String(ds.memoryCabinetEpisodeId || "") === plan.episodeId && String(ds.memoryCabinetScope || "") === plan.scopeKey;
+      }, episodeEntryPayload(chat, plan, data.enabled));
+    }
+    const active = new Set(Object.values(next).map(String));
+    for (const entry of existing) {
+      if (!entry?.id || active.has(String(entry.id))) continue;
+      try { await api(`lorebooks/${encodeURIComponent(book.id)}/entries/${encodeURIComponent(entry.id)}`, { method: "PATCH", body: { enabled: false } }); } catch {}
+    }
+    if (Object.keys(next).length || Object.keys(known).length) data.episodeEntryIds = next;
+  }
+
+  // ── 화면 ──
+  function factStatusChip(fact) {
+    return `<span class="mmc-chip ${fact.status === "current" ? "is-ok" : fact.status === "uncertain" ? "is-warn" : "is-soft"}">${esc(FACT_STATUS_LABEL[fact.status] || fact.status)}</span>`;
+  }
+  function scopeLabelChip(ids) {
+    const list = normalizeKnownBy(ids);
+    return list.length ? `<span class="mmc-chip is-soft">아는 인물 · ${esc(truncate(knownByLabel(list), 24))}${restrictionEffective() ? "" : " · 대기"}</span>` : "";
+  }
+  function episodeCard(ep) {
+    const timeLine = episodeTimeLine(ep);
+    return `<article class="mmc-card mmc-episode ${ep.replacedBy ? "is-replaced" : ""}" data-episode-id="${esc(ep.id)}">
+      <header class="mmc-episode-head"><div><b>${esc(ep.title)}</b>${timeLine ? `<small>${esc(timeLine)}</small>` : ""}</div><span class="mmc-chips">${ep.replacedBy ? '<span class="mmc-chip is-soft">지난 판</span>' : ""}${scopeLabelChip(ep.event.knownBy)}</span><button class="mmc-btn mmc-sm" data-action="edit-episode" data-id="${esc(ep.id)}">${SVG.edit}<span>편집</span></button></header>
+      <dl class="mmc-episode-grid">
+        ${ep.event.summary ? `<div><dt>사건</dt><dd>${esc(ep.event.summary)}${ep.event.participants.length ? `<small>참여 · ${esc(ep.event.participants.join(", "))}</small>` : ""}${ep.event.keyActions.length ? `<ul>${ep.event.keyActions.map((a) => `<li>${esc(a)}</li>`).join("")}</ul>` : ""}</dd></div>` : ""}
+        ${ep.facts.length ? `<div><dt>사실</dt><dd><ul class="mmc-episode-facts">${ep.facts.map((fact) => `<li>${factStatusChip(fact)}${scopeLabelChip(fact.knownBy)}<span>${esc(fact.text)}</span></li>`).join("")}</ul></dd></div>` : ""}
+        ${ep.characters.length ? `<div><dt>인물</dt><dd><ul class="mmc-episode-people">${ep.characters.map((c) => `<li><b>${esc(c.name)}</b>${[c.actions && `행동 · ${c.actions}`, c.relationChange && `관계 · ${c.relationChange}`, c.attitudeChange && `감정·태도 · ${c.attitudeChange}`].filter(Boolean).map((t) => `<small>${esc(t)}</small>`).join("")}</li>`).join("")}</ul></dd></div>` : ""}
+      </dl>
+      ${ep.keywords.length || ep.background.place ? `<span class="mmc-kw">${normalizeTextList([...ep.keywords, ep.background.place], 8, 60).map((k) => `<i>${esc(k)}</i>`).join("")}</span>` : ""}
+    </article>`;
+  }
+  function episodeView() {
+    const all = episodeList();
+    const live = all.filter((ep) => !ep.replacedBy).sort((a, b) => String(b.at || b.createdAt).localeCompare(String(a.at || a.createdAt)));
+    const old = all.filter((ep) => ep.replacedBy);
+    const on = episodeInjectionOn(state.currentData);
+    return `<div data-mmc-summary-alert-slot>${statusBanners()}</div>
+      <div class="mmc-toolbar"><div class="mmc-episode-note"><b>장면 기억 ${live.length}개</b><small>${on ? "장소·키워드가 대화에 나올 때 '현재' 사실만 들어가요." : "주입 꺼짐 · 보관만 해요."} 새 요약·장면 검토와 원문 정리에서 함께 만들어져요.</small></div><div class="mmc-actions"><button class="mmc-btn mmc-primary" data-action="new-episode">${SVG.plus}<span>직접 추가</span></button><button class="mmc-btn" data-action="open-source" data-source="summaries" data-target="anchor">${SVG.summary}<span>요약·장면에서</span></button><button class="mmc-btn" data-action="open-source" data-source="messages" data-target="anchor">${SVG.message}<span>대화에서</span></button></div></div>
+      <div class="mmc-episode-list">${live.length ? live.map(episodeCard).join("") : '<div class="mmc-empty">아직 장면 기억이 없어요. 새 요약이나 장면을 모델로 정리하면 함께 만들어져요.</div>'}</div>
+      ${old.length ? `<details class="mmc-episode-old"><summary>지난 판 ${old.length}개 · 근거가 바뀌어 새로 정리되기 전 기록 (주입하지 않아요)</summary>${old.map(episodeCard).join("")}</details>` : ""}`;
+  }
+  function episodeCandidateCard(kind, cand, index, selected) {
+    const checked = selected.has(String(index));
+    const blocked = episodeScopeBlocks(cand);
+    const dup = cand.duplicateOfEpisode ? episodeList().find((ep) => ep.id === cand.duplicateOfEpisode) : null;
+    const replaced = cand.replacesEpisodeIds.length;
+    const part = (sub, idx, obj) => scopeControl(`${kind}-ep-${sub}`, idx, obj.knownByIds, { needsReview: cand.scopeNeedsReview, confirmed: obj.scopeConfirmed });
+    return `<div class="mmc-candidate mmc-episode-cand ${checked ? "is-selected" : ""}"><input type="checkbox" data-episode-kind="${kind}" data-episode-index="${index}" ${checked ? "checked" : ""}><span>
+      <b>${esc(cand.title)}</b><small>${esc(episodeTimeLine({ background: cand.background }) || "배경 정보 없음")}</small>
+      ${cand.event.summary ? `<p>${esc(cand.event.summary)}</p>` : ""}
+      ${part("event", index, cand.event)}
+      ${cand.facts.length ? `<ul class="mmc-episode-facts">${cand.facts.map((fact, j) => `<li>${factStatusChip(fact)}<span>${esc(fact.text)}</span>${part("fact", `${index}.${j}`, fact)}</li>`).join("")}</ul>` : ""}
+      ${cand.characters.length ? `<small>인물 · ${esc(cand.characters.map((c) => [c.name, c.relationChange || c.attitudeChange].filter(Boolean).join(": ")).join(" / "))}</small>` : ""}
+      ${dup ? `<small class="mmc-scope-warn">이미 같은 근거로 만든 장면 기억 '${esc(truncate(dup.title, 40))}'이 있어요. 중복이라 선택을 풀어 뒀어요.</small>` : ""}
+      ${replaced ? `<small class="mmc-scope-note">근거가 바뀐 기존 장면 기억 ${replaced}개를 '지난 판'으로 돌리고 이 기록으로 바꿔요(지우지 않아요).</small>` : ""}
+      ${blocked ? `<small class="mmc-scope-warn">사건과 사실마다 아는 인물을 고르거나 '모두에게 공개'를 눌러야 적용돼요.</small>` : ""}
+      ${cand.scopeNeedsReview ? `<button type="button" class="mmc-btn mmc-sm mmc-ghost" data-action="episode-scope-public" data-episode-kind="${kind}" data-index="${index}">범위를 정하지 않은 부분은 모두에게 공개</button>` : ""}
+    </span></div>`;
+  }
+  function episodeCandidateGroup(kind, cands, selected) {
+    if (!cands.length) return "";
+    return `<section class="mmc-candidate-group is-episode"><div class="mmc-candidate-group-head"><span class="mmc-type-chip">장면</span><div><b>장면 기억 후보 ${cands.length}개</b><small>배경·사건·사실(아는 인물)·인물 변화로 정리한 기록</small></div></div><div class="mmc-candidate-list">${cands.map((cand, i) => episodeCandidateCard(kind, cand, i, selected)).join("")}</div></section>`;
+  }
+  function episodeScopeTarget(kind, index) {
+    const m = String(kind).match(/^(rev|cand)-ep-(event|fact)$/);
+    if (!m) return null;
+    const list = m[1] === "rev" ? state.reviewEpisodes : state.candEpisodes;
+    if (m[2] === "event") return list[Number(index)]?.event || null;
+    const [i, j] = String(index).split(".").map(Number);
+    return list[i]?.facts?.[j] || null;
+  }
+
+  // ── 편집 ──
+  function episodeEditorLayer() {
+    const d = normalizeEpisode(state.episodeDraft || { title: "새 장면" }) || normalizeEpisode({ title: "새 장면" });
+    const many = state.chatCharacters.length >= 2;
+    const factRow = (fact, j) => `<div class="mmc-episode-fact-edit" data-fact-row="${j}"><select id="mmc-ep-fact-status-${j}">${Object.entries(FACT_STATUS_LABEL).map(([id, label]) => `<option value="${id}" ${fact.status === id ? "selected" : ""}>${label}</option>`).join("")}</select><input id="mmc-ep-fact-text-${j}" value="${esc(fact.text)}" maxlength="300" placeholder="사실">${many || normalizeKnownBy(fact.knownBy).length ? scopeControl("epdraft-fact", j, fact.knownBy) : ""}</div>`;
+    const facts = [...d.facts, ...Array.from({ length: Math.max(0, (state.episodeDraftExtraFacts || 0)) }, () => ({ text: "", status: "current" }))];
+    return `<div class="mmc-layer-backdrop" data-action="close-layer"><section class="mmc-layer mmc-editor" data-layer-stop>
+      <header><div><span class="mmc-kicker">SCENE MEMORY</span><h3>${state.episodeDraft?.id ? "장면 기억 편집" : "새 장면 기억"}</h3></div><button class="mmc-icon-btn" data-action="close-layer">${SVG.close}</button></header>
+      <div class="mmc-layer-body">
+        <label class="mmc-field"><span>제목</span><input id="mmc-ep-title" value="${esc(d.title)}" maxlength="120"></label>
+        <div class="mmc-field-row"><label class="mmc-field"><span>날짜 <small>이야기 속</small></span><input id="mmc-ep-date" value="${esc(d.background.date)}" maxlength="80"></label><label class="mmc-field"><span>시간대</span><input id="mmc-ep-time" value="${esc(d.background.timeOfDay)}" maxlength="40"></label></div>
+        <label class="mmc-field"><span>장소 <small>대화에 나오면 이 기억이 떠올라요</small></span><input id="mmc-ep-place" value="${esc(d.background.place)}" maxlength="120"></label>
+        <label class="mmc-field"><span>사건 개요</span><textarea id="mmc-ep-summary" rows="3">${esc(d.event.summary)}</textarea></label>
+        <div class="mmc-field-row"><label class="mmc-field"><span>참여 인물 <small>쉼표로 구분</small></span><input id="mmc-ep-participants" value="${esc(d.event.participants.join(", "))}"></label><label class="mmc-field"><span>떠오를 키워드 <small>쉼표로 구분</small></span><input id="mmc-ep-keywords" value="${esc(d.keywords.join(", "))}"></label></div>
+        <label class="mmc-field"><span>핵심 행동·대사 <small>한 줄에 하나</small></span><textarea id="mmc-ep-actions" rows="3">${esc(d.event.keyActions.join("\n"))}</textarea></label>
+        ${many || normalizeKnownBy(d.event.knownBy).length ? `<div class="mmc-field"><span>이 장면을 아는 인물 <small>비우면 모두</small></span>${scopeControl("epdraft-event", 0, d.event.knownBy)}</div>` : ""}
+        <div class="mmc-field"><span>사실 <small>상태와 아는 인물을 함께 정해요 · 비운 줄은 지워져요</small></span>${facts.map(factRow).join("")}<button type="button" class="mmc-btn mmc-sm" data-action="episode-add-fact">${SVG.plus}<span>사실 추가</span></button></div>
+        <label class="mmc-field"><span>인물 변화 <small>한 줄에 '이름 | 행동 | 관계 변화 | 감정·태도 변화'</small></span><textarea id="mmc-ep-people" rows="3">${esc(d.characters.map((c) => [c.name, c.actions, c.relationChange, c.attitudeChange].join(" | ")).join("\n"))}</textarea></label>
+      </div>
+      <footer>${state.episodeDraft?.id ? `<button class="mmc-btn mmc-danger" data-action="delete-episode" data-id="${esc(state.episodeDraft.id)}">${SVG.trash}<span>삭제</span></button>` : "<span></span>"}<div><button class="mmc-btn" data-action="close-layer">취소</button><button class="mmc-btn mmc-primary" data-action="save-episode">저장</button></div></footer>
+    </section></div>`;
+  }
+  function captureEpisodeDraft() {
+    const base = normalizeEpisode(state.episodeDraft || { title: "새 장면" }) || {};
+    const val = (id) => String(document.getElementById(id)?.value || "").trim();
+    const scopeIds = (kind, index) => Array.from(document.querySelectorAll(`[data-scope-kind="${kind}"][data-scope-index="${index}"]`)).filter((box) => box.checked).map((box) => String(box.dataset.scopeChar || ""));
+    const hasScope = (kind, index) => !!document.querySelector(`[data-scope-kind="${kind}"][data-scope-index="${index}"]`);
+    const factRows = Array.from(document.querySelectorAll("[data-fact-row]"));
+    const facts = factRows.map((row) => {
+      const j = row.dataset.factRow;
+      const old = safeArray(base.facts)[Number(j)] || {};
+      return { id: old.id, text: val(`mmc-ep-fact-text-${j}`), status: val(`mmc-ep-fact-status-${j}`) || "current", knownBy: hasScope("epdraft-fact", j) ? scopeIds("epdraft-fact", j) : old.knownBy };
+    }).filter((fact) => fact.text);
+    state.episodeDraft = {
+      ...base,
+      id: state.episodeDraft?.id || "",
+      title: val("mmc-ep-title"),
+      keywords: val("mmc-ep-keywords").split(/[,，]/).map((x) => x.trim()).filter(Boolean),
+      background: { date: val("mmc-ep-date"), timeOfDay: val("mmc-ep-time"), place: val("mmc-ep-place") },
+      event: { summary: val("mmc-ep-summary"), participants: val("mmc-ep-participants").split(/[,，]/).map((x) => x.trim()).filter(Boolean), keyActions: val("mmc-ep-actions").split(/\n/).map((x) => x.trim()).filter(Boolean), knownBy: hasScope("epdraft-event", 0) ? scopeIds("epdraft-event", 0) : base.event?.knownBy },
+      facts,
+      characters: val("mmc-ep-people").split(/\n/).map((line) => line.split("|").map((x) => x.trim())).filter((p) => p[0]).map(([name, actions = "", relationChange = "", attitudeChange = ""]) => ({ name, actions, relationChange, attitudeChange })),
+    };
+  }
+  async function saveEpisodeDraft() {
+    captureEpisodeDraft();
+    const draft = state.episodeDraft;
+    if (!String(draft?.title || "").trim()) throw new Error("제목을 입력해 주세요.");
+    const data = await freshOwnedData();
+    const list = safeArray(data.episodes).map(normalizeEpisode).filter(Boolean);
+    const now = nowIso();
+    if (draft.id) {
+      const idx = list.findIndex((ep) => ep.id === draft.id);
+      if (idx < 0) throw new Error("수정할 장면 기억을 찾지 못했습니다.");
+      list[idx] = normalizeEpisode({ ...list[idx], ...draft, id: list[idx].id, createdAt: list[idx].createdAt, updatedAt: now });
+    } else {
+      if (list.filter((ep) => !ep.replacedBy).length >= EPISODE_LIMIT) throw new Error(`장면 기억은 최대 ${EPISODE_LIMIT}개까지 보관해요. 오래된 기록을 정리한 뒤 추가해 주세요.`);
+      list.push(normalizeEpisode({ ...draft, id: uid("ep"), at: now, createdAt: now, updatedAt: now }));
+    }
+    data.episodes = list;
+    await persistData(data);
+    state.episodeDraft = null; state.episodeDraftExtraFacts = 0; state.layer = null; render();
+  }
+
+  // ──────────────────────────────────────────────
+  // v2.1 진행 흐름
+  // 우산 돌려주기, 시험 준비, 계약 협상처럼 이어지는 일을 상태 기록과 함께 추적한다.
+  // 안전 규칙: (1) 비밀 근거의 최신 상태는 아는 인물에게만 (2) 분기 이후 기록은 분기 확인 대기
+  // (3) 주입 때 '현재 상태'를 상태 기록의 시간 순서로 다시 계산 (4) 근거가 바뀌면 재검토 표시
+  // (5) 해결→진행 중은 해결 근거보다 나중 근거와 사용자 확인이 있을 때만 (6) 제목이 비슷하다는 이유로 만들거나 합치지 않음
+  // (7) 약속과 같은 일은 약속에 연결하고, 주입은 약속 블록과 겹치지 않게 상태 한 줄만
+  // ──────────────────────────────────────────────
+  const THREAD_LIMIT = 200;
+  const THREAD_ENTRY_TAG = "memory-cabinet-threads";
+  const THREAD_RESTRICTED_TAG = "memory-cabinet-thread-restricted";
+  const THREAD_MARKER = "§MEMORY_CABINET_THREADS_V1§";
+  const THREAD_STATUS_LABEL = { open: "진행 중", hold: "보류", resolved: "해결", cancelled: "취소" };
+  const THREAD_ACTION_LABEL = { add: "새 흐름", update: "상태 갱신", resolve: "해결", hold: "보류", cancel: "취소", reopen: "다시 열기" };
+  const THREAD_CONTRACT = [
+    "Ongoing threads (fixed by the extension):",
+    "- In the same JSON array you may add objects with kind=\"thread\" for continuing matters (a borrowed item to return, an exam to prepare, a negotiation in progress).",
+    "- Shape: {\"kind\":\"thread\",\"action\":\"add|update|resolve|hold|cancel|reopen\",\"targetId\":\"exact id from CURRENT THREADS or null\",\"title\":\"...\",\"state\":\"where it stands now, per the source\",\"endCondition\":\"what would finish it\",\"participants\":[\"names\"],\"promiseId\":\"exact id of a related promise from CURRENT MEMORY or null\",\"knownBy\":[\"names\"]|[\"all\"],\"evidence\":\"short quote from the source\"}",
+    "- Use update/resolve/hold/cancel/reopen with an exact targetId. Never create a new thread for a matter already in CURRENT THREADS.",
+    "- When a promise in CURRENT MEMORY is the same matter, set promiseId instead of repeating the promise.",
+    "- reopen only when the source explicitly shows a resolved or cancelled matter starting again, and quote it in evidence.",
+    "- knownBy follows the knowledge-scope rule. A state learned in a restricted section is known only by those characters.",
+  ].join("\n");
+
+  function normalizeThreadEntry(value = {}) {
+    const raw = parseRecord(value);
+    const status = Object.prototype.hasOwnProperty.call(THREAD_STATUS_LABEL, raw.status) ? raw.status : "open";
+    return {
+      id: String(raw.id || uid("the")),
+      status,
+      state: String(raw.state || "").trim().slice(0, 300),
+      at: String(raw.at || raw.recordedAt || ""),
+      msgIndex: Number(raw.msgIndex) || 0,
+      recordedAt: String(raw.recordedAt || nowIso()),
+      via: raw.via === "manual" ? "manual" : "model",
+      evidence: String(raw.evidence || "").trim().slice(0, 300),
+      sourceIds: normalizeTextList(raw.sourceIds, 24, 160),
+      ...(Object.keys(normalizeSourceFingerprints(raw.sourceFingerprints)).length ? { sourceFingerprints: normalizeSourceFingerprints(raw.sourceFingerprints) } : {}),
+      ...(normalizeKnownBy(raw.knownBy).length ? { knownBy: normalizeKnownBy(raw.knownBy) } : {}),
+      ...(raw.candidateId ? { candidateId: String(raw.candidateId) } : {}),
+    };
+  }
+  function entryOrder(a, b) {
+    return String(a.at || "").localeCompare(String(b.at || "")) || (a.msgIndex - b.msgIndex) || String(a.recordedAt || "").localeCompare(String(b.recordedAt || ""));
+  }
+  function normalizeThread(value = {}) {
+    const raw = parseRecord(value);
+    const title = String(raw.title || "").trim().replace(/\s+/g, " ").slice(0, 120);
+    if (!title) return null;
+    const history = safeArray(raw.history).map(normalizeThreadEntry).sort(entryOrder).slice(-80);
+    return {
+      id: String(raw.id || uid("thread")),
+      title,
+      status: Object.prototype.hasOwnProperty.call(THREAD_STATUS_LABEL, raw.status) ? raw.status : "open",
+      priority: ["high", "normal", "low"].includes(raw.priority) ? raw.priority : "normal",
+      participants: normalizeTextList(raw.participants, 12, 80),
+      promiseId: String(raw.promiseId || ""),
+      currentState: String(raw.currentState || "").trim().slice(0, 300),
+      endCondition: String(raw.endCondition || "").trim().slice(0, 240),
+      links: safeArray(raw.links).filter(isRecord).map((l) => ({ kind: ["item", "episode"].includes(l.kind) ? l.kind : "item", id: String(l.id || "") })).filter((l) => l.id).slice(0, 24),
+      history,
+      ...(normalizeKnownBy(raw.knownBy).length ? { knownBy: normalizeKnownBy(raw.knownBy) } : {}),
+      ...(raw.branchAdjusted ? { branchAdjusted: true } : {}),
+      ...(raw.sourceCandidateId ? { sourceCandidateId: String(raw.sourceCandidateId) } : {}),
+      createdAt: String(raw.createdAt || nowIso()),
+      updatedAt: String(raw.updatedAt || raw.createdAt || nowIso()),
+    };
+  }
+  function threadList(data = state.currentData) { return safeArray(parseRecord(data).threads).map(normalizeThread).filter(Boolean); }
+  function threadScope(thread, entry) {
+    const t = normalizeKnownBy(thread.knownBy);
+    const e = normalizeKnownBy(entry?.knownBy);
+    if (t.length && e.length) return t.filter((id) => e.includes(id)).length ? t.filter((id) => e.includes(id)) : ["unresolved:disjoint-scope"];
+    return t.length ? t : e;
+  }
+  // 규칙 3: 상태는 기록의 시간 순서로 계산한다. viewer가 없으면 공개(아무 범위 없는) 기록만 본다.
+  function deriveThreadState(thread, viewer = null) {
+    const visible = thread.history.filter((entry) => {
+      const scope = threadScope(thread, entry);
+      if (!scope.length) return true;
+      return Array.isArray(viewer) && viewer.length && viewer.every((id) => scope.includes(id));
+    });
+    const last = visible[visible.length - 1];
+    if (!last) return null;
+    return { status: last.status, currentState: last.state, entry: last };
+  }
+  function threadOverall(thread) {
+    const last = thread.history[thread.history.length - 1];
+    return last ? { status: last.status, currentState: last.state || thread.currentState } : { status: thread.status, currentState: thread.currentState };
+  }
+
+  // ── 후보 ──
+  function threadSnapshotForPrompt() {
+    const rows = threadList().filter((t) => t.status !== "cancelled").slice(-30).map((t) => ({
+      id: t.id, title: t.title, status: threadOverall(t).status, state: threadOverall(t).currentState, endCondition: t.endCondition,
+      ...(t.promiseId ? { promiseId: t.promiseId } : {}),
+      ...(threadScope(t, t.history.at(-1)).length ? { knownBy: threadScope(t, t.history.at(-1)).map(characterName) } : {}),
+    }));
+    return `\n\n[CURRENT THREADS]\n${JSON.stringify(rows, null, 2)}\n[/CURRENT THREADS]`;
+  }
+  function normalizeThreadCandidate(row) {
+    if (!isRecord(row)) return null;
+    const stored = row.__threadCandidate === true;
+    const action = Object.prototype.hasOwnProperty.call(THREAD_ACTION_LABEL, String(row.action || "").toLowerCase()) ? String(row.action).toLowerCase() : "add";
+    const threads = threadList();
+    const target = row.targetId ? threads.find((t) => t.id === String(row.targetId)) : null;
+    if (action !== "add" && !target) return null;
+    const title = String(row.title || target?.title || "").trim().slice(0, 120);
+    if (!title) return null;
+    const scope = stored ? { knownByIds: normalizeKnownBy(row.knownByIds), scopeConfirmed: row.scopeConfirmed === true } : episodeScopeOf(row, false);
+    const items = safeArray(state.currentData?.items);
+    let promiseId = String(row.promiseId || "");
+    if (promiseId && !items.some((item) => item.id === promiseId && item.type === "promise")) promiseId = "";
+    if (!promiseId && action === "add") promiseId = items.find((item) => item.type === "promise" && titleKey(item.title) && titleKey(item.title) === titleKey(title))?.id || "";
+    const cand = {
+      __threadCandidate: true,
+      candidateId: String(row.candidateId || uid("thc")),
+      action, targetId: target?.id || "", title,
+      state: String(row.state || row.currentState || "").trim().slice(0, 300),
+      endCondition: String(row.endCondition || "").trim().slice(0, 240),
+      participants: normalizeTextList(row.participants, 12, 80),
+      promiseId, evidence: String(row.evidence || "").trim().slice(0, 300),
+      ...scope,
+      scopeNeedsReview: row.scopeNeedsReview === true,
+      similarTo: String(row.similarTo || ""),
+      needsConfirm: row.needsConfirm === true,
+      rejectReason: String(row.rejectReason || ""),
+    };
+    if (!stored) {
+      // 규칙 6·7: 같은 약속에 이미 흐름이 있으면 그 흐름의 갱신으로 바꾼다. 제목만 비슷하면 묻기만 한다.
+      if (cand.action === "add" && cand.promiseId) {
+        const linked = threads.find((t) => t.promiseId === cand.promiseId && t.status !== "cancelled");
+        if (linked) { cand.action = "update"; cand.targetId = linked.id; }
+      }
+      if (cand.action === "add") cand.similarTo = threads.find((t) => titleKey(t.title) && titleKey(t.title) === titleKey(cand.title))?.id || "";
+      if (cand.action === "reopen") {
+        if (!["resolved", "cancelled"].includes(target.status)) { cand.action = "update"; }
+        else { cand.needsConfirm = true; if (!cand.evidence) cand.rejectReason = "다시 연다는 근거 인용이 없어요"; }
+      }
+    }
+    const effectiveTarget = threads.find(t => t.id === cand.targetId);
+    if (effectiveTarget) {
+      const inherited = threadScope(effectiveTarget, effectiveTarget.history.at(-1));
+      if (inherited.length) {
+        cand.knownByIds = inherited.filter(id => !cand.knownByIds.length || cand.knownByIds.includes(id));
+        if (!cand.knownByIds.length) cand.knownByIds = ["unresolved:disjoint-scope"];
+      }
+    }
+    return cand;
+  }
+  function threadCandidateBlocks(cand) {
+    if (cand.rejectReason) return true;
+    return scopeBlocksApply(cand);
+  }
+  function extractThreadCandidates(rawRows, sourceRows, mode) {
+    const cands = safeArray(rawRows).filter((row) => isRecord(row) && (row.kind === "thread" || row.type === "thread")).map(normalizeThreadCandidate).filter(Boolean).slice(0, 10);
+    const batchAt = batchSourceTime(sourceRows);
+    for (const cand of cands) {
+      if (mode === "summaries" && batchHasRestricted(sourceRows)) cand.scopeNeedsReview = true;
+      // 규칙 5: 해결된 흐름을 다시 여는 근거는 해결 기록보다 나중이어야 한다.
+      if (cand.action === "reopen" && !cand.rejectReason) {
+        const target = threadList().find((t) => t.id === cand.targetId);
+        const closing = [...safeArray(target?.history)].reverse().find((entry) => ["resolved", "cancelled"].includes(entry.status));
+        if (closing && batchAt && closing.at && batchAt <= closing.at) cand.rejectReason = "해결 기록보다 오래된 근거라 다시 열 수 없어요";
+      }
+    }
+    return cands;
+  }
+  function preselectThreads(cands) {
+    return new Set(cands.map((cand, i) => (threadCandidateBlocks(cand) || cand.needsConfirm || cand.similarTo ? null : String(i))).filter(Boolean));
+  }
+  function applyThreadCandidates(data, cands, selected, { fps = {}, sourceIds = [], rows = [] } = {}) {
+    const out = { applied: 0, held: [], createdIds: [] };
+    const list = safeArray(data.threads).map(normalizeThread).filter(Boolean);
+    const at = batchSourceTime(rows) || nowIso();
+    const msgIndex = Math.max(0, ...safeArray(rows).map((row) => Number(row?.endIndex) || 0));
+    const now = nowIso();
+    cands.forEach((cand, i) => {
+      if (!selected.has(String(i))) return;
+      if (threadCandidateBlocks(cand)) { out.held.push(i); return; }
+      if (list.some((t) => t.sourceCandidateId === cand.candidateId || t.history.some((entry) => entry.candidateId === cand.candidateId))) { out.applied += 1; return; }
+      const status = { add: "open", update: null, resolve: "resolved", hold: "hold", cancel: "cancelled", reopen: "open" }[cand.action];
+      const entry = { status: status || "open", state: cand.state, at, msgIndex, recordedAt: now, via: "model", evidence: cand.evidence, sourceIds, sourceFingerprints: fps, knownBy: cand.knownByIds, candidateId: cand.candidateId };
+      if (cand.action === "add") {
+        if (list.length >= THREAD_LIMIT) { out.held.push(i); return; }
+        const thread = normalizeThread({ id: uid("thread"), title: cand.title, status: "open", participants: cand.participants, promiseId: cand.promiseId, endCondition: cand.endCondition, currentState: cand.state, history: [entry], sourceCandidateId: cand.candidateId, createdAt: now, updatedAt: now });
+        list.push(thread); out.createdIds.push(thread.id); out.applied += 1; return;
+      }
+      const idx = list.findIndex((t) => t.id === cand.targetId);
+      if (idx < 0) { out.held.push(i); return; }
+      const thread = list[idx];
+      const inherited = threadScope(thread, thread.history.at(-1));
+      if (inherited.length) {
+        entry.knownBy = inherited.filter(id => !safeArray(cand.knownByIds).length || cand.knownByIds.includes(id));
+        if (!entry.knownBy.length) { out.held.push(i); return; }
+      }
+      if (!status) entry.status = deriveThreadState(thread, normalizeKnownBy(cand.knownByIds).length ? normalizeKnownBy(cand.knownByIds) : null)?.status || thread.status;
+      if (["resolved", "cancelled"].includes(thread.status) && entry.status === "open" && cand.action !== "reopen") entry.status = thread.status;
+      const next = normalizeThread({ ...thread, history: [...thread.history, entry], endCondition: cand.endCondition || thread.endCondition, participants: normalizeTextList([...thread.participants, ...cand.participants], 12, 80), promiseId: thread.promiseId || cand.promiseId, updatedAt: now });
+      const overall = threadOverall(next);
+      list[idx] = normalizeThread({ ...next, status: overall.status, currentState: overall.currentState });
+      out.applied += 1;
+    });
+    data.threads = list;
+    return out;
+  }
+
+  // ── 주입 ──
+  function threadInjectable(status) { return status === "open" || status === "hold"; }
+  function injectionPlanLayers(d) {
+    const threads = [];
+    for (const thread of threadList(d)) {
+      if (normalizeKnownBy(thread.knownBy).length) continue;
+      const pub = deriveThreadState(thread, null);
+      if (!pub || !threadInjectable(pub.status)) continue;
+      threads.push({ type: "thread", id: thread.id, title: thread.title, priority: thread.priority, updatedAt: pub.entry?.at || thread.updatedAt, currentState: pub.currentState, status: pub.status, promiseId: thread.promiseId, endCondition: thread.endCondition });
+    }
+    return { threads, duplicates: [] };
+  }
+  function threadLine(row, data) {
+    const promise = row.promiseId ? safeArray(data.items).find((item) => item.id === row.promiseId) : null;
+    const label = THREAD_STATUS_LABEL[row.status] || "진행 중";
+    if (promise && sharedPromises(data).some((item) => item.id === promise.id)) return `- '${truncate(promise.title, 60)}' 약속의 진행 상태[${label}]: ${truncate(row.currentState || "변화 없음", 200)}`;
+    return `- [${label}] ${truncate(row.title, 80)}: ${truncate(row.currentState || "진행 중", 200)}${row.endCondition ? ` (끝나는 조건: ${truncate(row.endCondition, 100)})` : ""}`;
+  }
+  function threadContext(chat, data) {
+    const rows = injectionPlan(data).threads;
+    if (!rows.length) return "";
+    return [THREAD_MARKER, `[진행 흐름 · ${chatLabel(chat)}]`, "아래는 이 RP에서 이어지고 있는 일과 지금 상태다.", ...rows.map((row) => threadLine(row, data)),
+      "끝나는 조건이 채워지기 전에는 이미 끝난 것처럼 다루지 마라. 같은 일에 대해 이 기록이 떠올린 옛 장면·요약과 다르면 이 기록을 최신 상태로 본다."].join("\n");
+  }
+  // 규칙 1: 공개 상태보다 새 비밀 상태는 그 인물에게만 따로 넣는다. 흐름 전체가 비밀이면 흐름 전체를 그 인물에게만.
+  function restrictedThreadPlans(data) {
+    const plans = [];
+    for (const thread of threadList(data)) {
+      const pub = deriveThreadState(thread, null);
+      const sets = new Map();
+      for (const entry of thread.history) {
+        const scope = threadScope(thread, entry);
+        if (!scope.length) continue;
+        if (pub?.entry && entryOrder(entry, pub.entry) <= 0) continue;
+        const key = scope.slice().sort().join(",");
+        sets.set(key, scope);
+      }
+      for (const [key, scope] of sets) {
+        const view = deriveThreadState(thread, scope);
+        if (!view || !threadInjectable(view.status)) continue;
+        plans.push({ threadId: thread.id, scopeKey: key, scope, content: [THREAD_MARKER, `[진행 흐름 · ${truncate(thread.title, 80)} · ${knownByLabel(scope)}만 아는 최신 상태]`, `아래 상태는 ${knownByLabel(scope)}만 알고 있다. 모르는 인물이 알고 있는 것처럼 굴게 하지 마라.`, `- [${THREAD_STATUS_LABEL[view.status]}] ${truncate(view.currentState || "", 220)}`].join("\n"), title: thread.title });
+      }
+    }
+    return plans;
+  }
+  async function syncLayerEntries(book, rows, chat, data) {
+    const content = threadContext(chat, data);
+    data.threadEntryId = await upsertEntry(book.id, rows, String(data.threadEntryId || ""), (entry) => entry?.tag === THREAD_ENTRY_TAG,
+      constantEntryPayload({ tag: THREAD_ENTRY_TAG, name: "진행 흐름 · 지금 상태", content: content || `${THREAD_MARKER}\n(진행 중인 흐름 없음)`, enabled: data.enabled && !!content, order: 31, dynamicState: { memoryCabinetChatId: String(chat.id), managedBy: LOREBOOK_TAG, kind: "threads" } }));
+    const effective = restrictionEffective(chat);
+    const known = parseRecord(data.threadRestrictedEntryIds);
+    const next = {};
+    for (const plan of restrictedThreadPlans(data)) {
+      const mapKey = `${plan.threadId}|${plan.scopeKey}`;
+      next[mapKey] = await upsertEntry(book.id, rows, String(known[mapKey] || ""), (entry) => {
+        const ds = parseRecord(entry?.dynamicState);
+        return entry?.tag === THREAD_RESTRICTED_TAG && String(ds.memoryCabinetThreadId || "") === plan.threadId && String(ds.memoryCabinetScope || "") === plan.scopeKey;
+      }, { ...constantEntryPayload({ tag: THREAD_RESTRICTED_TAG, name: `진행 흐름 · ${truncate(plan.title, 90)} · 일부만 앎`, content: plan.content, enabled: data.enabled && effective, order: 32, dynamicState: { memoryCabinetChatId: String(chat.id), memoryCabinetThreadId: plan.threadId, memoryCabinetScope: plan.scopeKey, managedBy: LOREBOOK_TAG, kind: "thread-restricted" } }), characterFilterMode: "include", characterFilterIds: plan.scope });
+    }
+    const active = new Set(Object.values(next).map(String));
+    for (const entry of rows.filter((e) => e?.tag === THREAD_RESTRICTED_TAG)) {
+      if (!entry?.id || active.has(String(entry.id))) continue;
+      try { await api(`lorebooks/${encodeURIComponent(book.id)}/entries/${encodeURIComponent(entry.id)}`, { method: "PATCH", body: { enabled: false } }); } catch {}
+    }
+    if (Object.keys(next).length || Object.keys(known).length) data.threadRestrictedEntryIds = next;
+  }
+
+  // ── 화면 ──
+  function threadStatusChip(status) {
+    return `<span class="mmc-chip ${status === "open" ? "is-ok" : status === "hold" ? "is-warn" : "is-soft"}">${esc(THREAD_STATUS_LABEL[status] || status)}</span>`;
+  }
+  function threadCard(thread) {
+    const pub = deriveThreadState(thread, null);
+    const overall = threadOverall(thread);
+    const promise = thread.promiseId ? safeArray(state.currentData?.items).find((item) => item.id === thread.promiseId) : null;
+    const secretNewer = overall.currentState !== pub?.currentState || overall.status !== pub?.status;
+    const stale = safeArray(state.staleRecords).some((row) => row.kind === "thread" && row.id === thread.id);
+    return `<article class="mmc-card mmc-thread is-${esc(thread.status)}">
+      <header class="mmc-episode-head"><div><b>${esc(thread.title)}</b><small>${esc([thread.participants.join(", "), thread.endCondition && `끝나는 조건 · ${thread.endCondition}`].filter(Boolean).join(" · ") || "끝나는 조건 미정")}</small></div><span class="mmc-chips">${threadStatusChip(pub?.status || thread.status)}${promise ? `<span class="mmc-chip is-soft">약속 · ${esc(truncate(promise.title, 20))}</span>` : ""}${scopeLabelChip(thread.knownBy)}${stale ? '<span class="mmc-chip is-warn">근거 바뀜</span>' : ""}${thread.branchAdjusted ? '<span class="mmc-chip is-warn">분기 시점으로 맞춤</span>' : ""}</span><button class="mmc-btn mmc-sm" data-action="edit-thread" data-id="${esc(thread.id)}">${SVG.edit}<span>편집</span></button></header>
+      <p class="mmc-thread-state">${esc(pub?.currentState || (normalizeKnownBy(thread.knownBy).length ? overall.currentState : "") || "아직 상태 기록이 없어요")}</p>
+      ${secretNewer && pub ? `<small class="mmc-scope-note">${SVG.lock}일부 인물만 아는 더 새 상태가 있어요 · ${esc(truncate(overall.currentState, 120))}</small>` : ""}
+      <div class="mmc-thread-actions">${Object.entries(THREAD_STATUS_LABEL).map(([id, label]) => `<button class="mmc-btn mmc-sm ${thread.status === id ? "mmc-primary" : ""}" data-action="thread-status" data-id="${esc(thread.id)}" data-status="${id}" ${thread.status === id ? "disabled" : ""}>${label}</button>`).join("")}</div>
+      ${thread.history.length ? `<details class="mmc-thread-history"><summary>상태 기록 ${thread.history.length}개</summary><ol>${thread.history.slice().reverse().map((entry) => `<li>${threadStatusChip(entry.status)}${scopeLabelChip(threadScope(thread, entry))}<span>${esc(entry.state || "")}</span><small>${esc([sourceDate(entry.at) || "", entry.via === "manual" ? "직접 바꿈" : "모델 정리", entry.evidence && `“${truncate(entry.evidence, 60)}”`].filter(Boolean).join(" · "))}</small></li>`).join("")}</ol></details>` : ""}
+    </article>`;
+  }
+  function threadView() {
+    const all = threadList();
+    const live = all.filter((t) => threadInjectable(t.status));
+    const closed = all.filter((t) => !threadInjectable(t.status));
+    return `<div data-mmc-summary-alert-slot>${statusBanners()}</div>
+      <div class="mmc-toolbar"><div class="mmc-episode-note"><b>진행 흐름 ${live.length}개</b><small>이어지는 일의 지금 상태를 매 턴 넣어요. 약속과 같은 일은 약속에 묶여 한 번만 들어가요.</small></div><div class="mmc-actions"><button class="mmc-btn mmc-primary" data-action="new-thread">${SVG.plus}<span>직접 추가</span></button></div></div>
+      <div class="mmc-episode-list">${live.length ? live.sort((a, b) => String(b.updatedAt).localeCompare(String(a.updatedAt))).map(threadCard).join("") : '<div class="mmc-empty">진행 중인 흐름이 없어요. 새 요약·장면을 모델로 정리하면 함께 제안돼요.</div>'}</div>
+      ${closed.length ? `<details class="mmc-episode-old"><summary>해결·취소된 흐름 ${closed.length}개 (넣지 않아요)</summary>${closed.map(threadCard).join("")}</details>` : ""}`;
+  }
+  function threadCandidateCard(kind, cand, index, selected) {
+    const checked = selected.has(String(index));
+    const target = cand.targetId ? threadList().find((t) => t.id === cand.targetId) : null;
+    const similar = cand.similarTo ? threadList().find((t) => t.id === cand.similarTo) : null;
+    const promise = cand.promiseId ? safeArray(state.currentData?.items).find((item) => item.id === cand.promiseId) : null;
+    return `<div class="mmc-candidate mmc-episode-cand ${checked ? "is-selected" : ""}"><input type="checkbox" data-thread-kind="${kind}" data-thread-index="${index}" ${checked ? "checked" : ""} ${cand.rejectReason ? "disabled" : ""}><span>
+      <b>${esc(cand.title)}</b><small><strong>${esc(THREAD_ACTION_LABEL[cand.action] || cand.action)}</strong>${target ? ` · 지금 ${esc(THREAD_STATUS_LABEL[target.status])}` : ""}${promise ? ` · 약속 '${esc(truncate(promise.title, 30))}'에 연결` : ""}</small>
+      ${cand.state ? `<p>${esc(cand.state)}</p>` : ""}
+      ${cand.endCondition ? `<small>끝나는 조건 · ${esc(cand.endCondition)}</small>` : ""}
+      ${cand.evidence ? `<em>“${esc(cand.evidence)}”</em>` : ""}
+      ${cand.needsConfirm && !cand.rejectReason ? `<small class="mmc-scope-warn">해결된 흐름을 다시 여는 제안이에요. 근거를 확인한 뒤 직접 골라 주세요.</small>` : ""}
+      ${cand.rejectReason ? `<small class="mmc-scope-warn">적용할 수 없어요 · ${esc(cand.rejectReason)}</small>` : ""}
+      ${similar ? `<small class="mmc-scope-warn">제목이 같은 흐름 '${esc(truncate(similar.title, 40))}'이 있어요. 같은 일이면 갱신으로 바꿔 주세요. <button type="button" class="mmc-btn mmc-sm mmc-ghost" data-action="thread-to-update" data-thread-kind="${kind}" data-index="${index}">기존 흐름 갱신으로 바꾸기</button></small>` : ""}
+      ${scopeControl(`${kind}-th`, index, cand.knownByIds, { needsReview: cand.scopeNeedsReview, confirmed: cand.scopeConfirmed })}
+    </span></div>`;
+  }
+  function threadCandidateGroup(kind, cands, selected) {
+    if (!cands.length) return "";
+    return `<section class="mmc-candidate-group is-thread"><div class="mmc-candidate-group-head"><span class="mmc-type-chip">흐름</span><div><b>진행 흐름 후보 ${cands.length}개</b><small>새 흐름 · 상태 갱신 · 해결 · 다시 열기</small></div></div><div class="mmc-candidate-list">${cands.map((cand, i) => threadCandidateCard(kind, cand, i, selected)).join("")}</div></section>`;
+  }
+  function threadScopeTarget(kind, index) {
+    const m = String(kind).match(/^(rev|cand)-th$/);
+    if (!m) return null;
+    return (m[1] === "rev" ? state.reviewThreads : state.candThreads)[Number(index)] || null;
+  }
+  // ── 편집 ──
+  function threadEditorLayer() {
+    const d = normalizeThread(state.threadDraft || { title: "새 흐름" }) || normalizeThread({ title: "새 흐름" });
+    const promises = safeArray(state.currentData?.items).filter((item) => item.type === "promise");
+    const many = state.chatCharacters.length >= 2;
+    return `<div class="mmc-layer-backdrop" data-action="close-layer"><section class="mmc-layer mmc-editor" data-layer-stop>
+      <header><div><span class="mmc-kicker">ONGOING THREAD</span><h3>${state.threadDraft?.id ? "진행 흐름 편집" : "새 진행 흐름"}</h3></div><button class="mmc-icon-btn" data-action="close-layer">${SVG.close}</button></header>
+      <div class="mmc-layer-body">
+        <label class="mmc-field"><span>제목</span><input id="mmc-th-title" value="${esc(state.threadDraft?.id ? d.title : String(state.threadDraft?.title || ""))}" maxlength="120" placeholder="예: 우산을 다음 방문 때 돌려주기"></label>
+        <label class="mmc-field"><span>지금 상태 <small>바꾸면 상태 기록에 '직접 바꿈'으로 남아요</small></span><textarea id="mmc-th-state" rows="3">${esc(threadOverall(d).currentState)}</textarea></label>
+        <label class="mmc-field"><span>끝나는 조건</span><input id="mmc-th-end" value="${esc(d.endCondition)}" maxlength="240" placeholder="예: 우산을 돌려받으면"></label>
+        <div class="mmc-field-row"><label class="mmc-field"><span>관련 인물 <small>쉼표로 구분</small></span><input id="mmc-th-people" value="${esc(d.participants.join(", "))}"></label><label class="mmc-field"><span>중요도</span><select id="mmc-th-priority">${["high", "normal", "low"].map((p) => `<option value="${p}" ${d.priority === p ? "selected" : ""}>${PRIORITY_LABEL[p]}</option>`).join("")}</select></label></div>
+        <label class="mmc-field"><span>연결할 약속 <small>같은 일이면 연결하세요 · 주입은 약속과 겹치지 않게 상태 한 줄만 더해요</small></span><select id="mmc-th-promise"><option value="">연결 안 함</option>${promises.map((item) => `<option value="${esc(item.id)}" ${d.promiseId === item.id ? "selected" : ""}>${esc(truncate(item.title, 60))} · ${esc(PROMISE_STATUS_LABEL[item.status] || "")}</option>`).join("")}</select></label>
+        ${many || normalizeKnownBy(d.knownBy).length ? `<div class="mmc-field"><span>흐름 전체를 아는 인물 <small>비우면 모두</small></span>${scopeControl("thdraft", 0, d.knownBy)}</div>` : ""}
+      </div>
+      <footer>${state.threadDraft?.id ? `<button class="mmc-btn mmc-danger" data-action="delete-thread" data-id="${esc(state.threadDraft.id)}">${SVG.trash}<span>삭제</span></button>` : "<span></span>"}<div><button class="mmc-btn" data-action="close-layer">취소</button><button class="mmc-btn mmc-primary" data-action="save-thread">저장</button></div></footer>
+    </section></div>`;
+  }
+  async function saveThreadDraft() {
+    const val = (id) => String(document.getElementById(id)?.value || "").trim();
+    const title = val("mmc-th-title");
+    if (!title) throw new Error("제목을 입력해 주세요.");
+    const scopeBoxes = Array.from(document.querySelectorAll('[data-scope-kind="thdraft"]'));
+    const data = await freshOwnedData();
+    const list = safeArray(data.threads).map(normalizeThread).filter(Boolean);
+    const now = nowIso();
+    const stateText = val("mmc-th-state");
+    const fields = { title, endCondition: val("mmc-th-end"), participants: val("mmc-th-people").split(/[,，]/).map((x) => x.trim()).filter(Boolean), priority: val("mmc-th-priority") || "normal", promiseId: val("mmc-th-promise") };
+    if (state.threadDraft?.id) {
+      const idx = list.findIndex((t) => t.id === state.threadDraft.id);
+      if (idx < 0) throw new Error("수정할 흐름을 찾지 못했습니다.");
+      const old = list[idx];
+      const knownBy = scopeBoxes.length ? scopeBoxes.filter((b) => b.checked).map((b) => String(b.dataset.scopeChar || "")) : old.knownBy;
+      const history = stateText && stateText !== threadOverall(old).currentState ? [...old.history, { status: threadOverall(old).status, state: stateText, knownBy: threadScope(old, old.history.at(-1)), at: now, recordedAt: now, via: "manual" }] : old.history;
+      const next = normalizeThread({ ...old, ...fields, knownBy, history, updatedAt: now });
+      list[idx] = normalizeThread({ ...next, ...threadOverall(next) });
+    } else {
+      if (list.length >= THREAD_LIMIT) throw new Error(`진행 흐름은 최대 ${THREAD_LIMIT}개까지 보관해요. 끝난 흐름을 정리한 뒤 추가해 주세요.`);
+      const knownBy = scopeBoxes.filter((b) => b.checked).map((b) => String(b.dataset.scopeChar || ""));
+      list.push(normalizeThread({ id: uid("thread"), ...fields, knownBy, status: "open", currentState: stateText, history: stateText ? [{ status: "open", state: stateText, at: now, recordedAt: now, via: "manual" }] : [], createdAt: now, updatedAt: now }));
+    }
+    data.threads = list;
+    await persistData(data);
+    state.threadDraft = null; state.layer = null; render();
+  }
+  async function setThreadStatus(threadId, status) {
+    const data = await freshOwnedData();
+    const list = safeArray(data.threads).map(normalizeThread).filter(Boolean);
+    const idx = list.findIndex((t) => t.id === threadId);
+    if (idx < 0 || !THREAD_STATUS_LABEL[status]) return;
+    const old = list[idx];
+    // 규칙 5: 끝난 흐름을 다시 여는 것은 사용자 확인을 받는다.
+    if (["resolved", "cancelled"].includes(old.status) && threadInjectable(status) && !window.confirm(`'${old.title}' 흐름을 다시 진행 중으로 돌릴까요? 매 턴 주입에 다시 들어갑니다.`)) return;
+    const now = nowIso();
+    const next = normalizeThread({ ...old, history: [...old.history, { status, state: threadOverall(old).currentState, knownBy: threadScope(old, old.history.at(-1)), at: now, recordedAt: now, via: "manual" }], updatedAt: now });
+    list[idx] = normalizeThread({ ...next, ...threadOverall(next), branchAdjusted: false });
+    data.threads = list;
+    await persistData(data);
+    render();
+  }
+
+  // ── v2.1 장면 기억·진행 흐름을 공통 경로(근거 확인·분기 대기·주입 계획)에 잇는 연결부 ──
+  function staleLayerSources(data) {
+    const rows = [];
+    for (const ep of liveEpisodes(data)) {
+      const fps = normalizeSourceFingerprints(ep.sourceFingerprints);
+      if (Object.keys(fps).length) rows.push({ kind: "episode", id: ep.id, title: `장면 · ${ep.title}`, fps });
+    }
+    if (typeof threadList === "function") {
+      for (const thread of threadList(data).filter((t) => ["open", "hold"].includes(t.status))) {
+        const fps = {};
+        for (const entry of thread.history) Object.assign(fps, normalizeSourceFingerprints(entry.sourceFingerprints));
+        if (Object.keys(fps).length) rows.push({ kind: "thread", id: thread.id, title: `흐름 · ${thread.title}`, fps });
+      }
+    }
+    return rows;
+  }
+  function staleLayerEditButton(row) {
+    if (row.kind === "episode") return `<button class="mmc-btn mmc-sm" data-action="edit-episode" data-id="${esc(row.id)}">장면 편집</button>`;
+    if (row.kind === "thread") return `<button class="mmc-btn mmc-sm" data-action="edit-thread" data-id="${esc(row.id)}">흐름 편집</button>`;
+    return "";
+  }
+  function acknowledgeStaleLayer(data, row) {
+    const ack = (fps) => { const out = normalizeSourceFingerprints(fps); for (const reason of row.reasons) out[reason.key] = reason.type === "changed" && reason.current ? reason.current : "ack"; return out; };
+    if (row.kind === "episode" && Array.isArray(data.episodes)) {
+      data.episodes = data.episodes.map(normalizeEpisode).filter(Boolean).map((ep) => (ep.id === row.id ? normalizeEpisode({ ...ep, sourceFingerprints: ack(ep.sourceFingerprints) }) : ep));
+      return true;
+    }
+    if (row.kind === "thread" && Array.isArray(data.threads) && typeof normalizeThread === "function") {
+      data.threads = data.threads.map(normalizeThread).filter(Boolean).map((t) => (t.id !== row.id ? t : normalizeThread({ ...t, history: t.history.map((entry) => ({ ...entry, sourceFingerprints: ack(entry.sourceFingerprints) })) })));
+      return true;
+    }
+    return false;
+  }
+  // 분기 시점 뒤의 장면 기억·진행 흐름(또는 흐름의 상태 기록)은 분기 확인 대기로 옮긴다.
+  function holdPostBranchLayers(next, hold, cutMs, raw) {
+    if (Array.isArray(next.episodes)) {
+      const rawEps = new Map(safeArray(raw.episodes).filter(isRecord).map((row) => [String(row.id || ""), row]));
+      next.episodes = next.episodes.filter((ep) => {
+        const src = rawEps.get(ep.id) || {};
+        const reason = timeAfter(src.createdAt, cutMs) ? "created" : timeAfter(src.updatedAt, cutMs) ? "updated" : "";
+        if (!reason) return true;
+        hold.episodes.push({ ...ep, holdReason: reason });
+        return false;
+      });
+    }
+    if (Array.isArray(next.threads) && typeof normalizeThread === "function") {
+      const rawThreads = new Map(safeArray(raw.threads).filter(isRecord).map((row) => [String(row.id || ""), row]));
+      next.threads = next.threads.filter((thread) => {
+        const src = rawThreads.get(thread.id) || {};
+        if (timeAfter(src.createdAt, cutMs)) { hold.threads.push({ ...thread, holdReason: "created" }); return false; }
+        const rawHistory = new Map(safeArray(src.history).filter(isRecord).map((row) => [String(row.id || ""), row]));
+        const keep = [];
+        thread.history.forEach((entry) => {
+          const rawEntry = rawHistory.get(entry.id) || {};
+          const at = rawEntry.recordedAt || rawEntry.at || "";
+          if (timeAfter(at, cutMs)) hold.threadEntries.push({ threadId: thread.id, threadTitle: thread.title, entry: { ...entry }, holdReason: "created" });
+          else keep.push(entry);
+        });
+        if (keep.length !== thread.history.length) {
+          thread.history = keep;
+          // 분기 시점 상태로 되돌린다: 남은 기록 중 마지막 것이 지금 상태다. 근거가 없으면 사용자가 확인한다.
+          const last = keep[keep.length - 1];
+          if (last) { thread.status = last.status; thread.currentState = last.state; }
+          thread.branchAdjusted = true;
+        }
+        return true;
+      });
+    }
+  }
+  function restoreHeldLayerRecord(data, key, row) {
+    if (key === "scopeReviewHold") { data.scopeReviewHold = [...safeArray(data.scopeReviewHold), structuredClone(row)]; return true; }
+    const clean = { ...row }; delete clean.holdReason;
+    if (key === "episodes") {
+      const list = safeArray(data.episodes).map(normalizeEpisode).filter(Boolean);
+      if (!list.some((ep) => ep.id === clean.id)) list.push(normalizeEpisode(clean));
+      data.episodes = list; return true;
+    }
+    if (key === "threads" && typeof normalizeThread === "function") {
+      const list = safeArray(data.threads).map(normalizeThread).filter(Boolean);
+      if (!list.some((t) => t.id === clean.id)) list.push(normalizeThread(clean));
+      data.threads = list; return true;
+    }
+    if (key === "threadEntries" && typeof normalizeThread === "function") {
+      const list = safeArray(data.threads).map(normalizeThread).filter(Boolean);
+      const thread = list.find((t) => t.id === row.threadId);
+      if (!thread) return false;
+      if (!thread.history.some((entry) => entry.id === row.entry?.id)) thread.history.push(row.entry);
+      data.threads = list.map((t) => (t.id === thread.id ? normalizeThread({ ...thread, ...deriveThreadState(thread) }) : t));
+      return true;
+    }
+    return false;
+  }
+
+  // ── v2.1 근거가 바뀐 기억 ──
+  // 결정: 주입은 유지하고 검토 대기에 표시한다. 기억 자체는 바꾸지 않는다.
+  const SUMMARY_SOURCE_TYPES = new Set(["summary", "summary-model-review", "health-check"]);
+  function injectableItem(item) {
+    return item.type === "promise" ? ["active", "hold"].includes(item.status) : item.active && !item.archived;
+  }
+  async function refreshStaleRecords() {
+    const data = state.currentData;
+    const chatId = String(state.currentChat?.id || "");
+    if (!data || !chatId || !ownershipAllowsData()) { state.staleRecords = []; return; }
+    const summaries = new Map(safeArray(parseRecord(state.currentChat?.metadata).summaryEntries).filter(isRecord).map((row) => [String(row.id), textHash(row.content || "")]));
+    const items = safeArray(data.items).filter(injectableItem);
+    const memory = normalizeElementMemory(data.elementMemory);
+    const extra = typeof staleLayerSources === "function" ? staleLayerSources(data) : [];
+    const needMessages = items.some((item) => Object.keys(normalizeSourceFingerprints(item.sourceFingerprints)).some((key) => key.startsWith("message:")))
+      || memory.entities.some((entity) => [...entity.currentFacts, ...entity.historyFacts].some((fact) => safeArray(fact.source?.fingerprints).length))
+      || extra.some((row) => Object.keys(row.fps).some((key) => key.startsWith("message:")));
+    let messageFps = null;
+    if (needMessages) {
+      try { messageFps = new Set(extractArray(await api(`chats/${encodeURIComponent(chatId)}/messages`), ["messages", "items", "results"]).map(messageSourceFingerprint)); } catch { messageFps = null; }
+    }
+    const amFps = advancedMemoryEnabled() && state.amAllFingerprints instanceof Set && !state.amSceneError && state.amChatId === chatId ? state.amAllFingerprints : null;
+    const watch = parseRecord(state.sourceWatchByChat[chatId]);
+    let watchChanged = false;
+    const check = (fps) => {
+      const reasons = [];
+      for (const [key, expected] of Object.entries(fps)) {
+        if (expected === "ack") continue;
+        const kind = key.slice(0, key.indexOf(":")); const id = key.slice(key.indexOf(":") + 1);
+        if (kind === "summary") {
+          const current = summaries.get(id);
+          if (current === undefined) reasons.push({ key, type: "missing", label: "근거 요약이 지금은 없어요" });
+          else if (current !== expected) reasons.push({ key, type: "changed", label: "근거 요약 내용이 바뀌었어요", current });
+        } else if (kind === "message" && messageFps && !messageFps.has(expected)) reasons.push({ key, type: "changed", label: "근거 메시지가 바뀌었거나 지워졌어요(스와이프 포함)" });
+        else if (kind === "am" && amFps && !amFps.has(expected)) reasons.push({ key, type: "changed", label: "근거 장면 요약이 바뀌었거나 지워졌어요" });
+      }
+      return reasons;
+    };
+    const result = [];
+    for (const item of items) {
+      const fps = normalizeSourceFingerprints(item.sourceFingerprints);
+      const reasons = check(fps);
+      // 지문이 없는 예전 기록: 요약 근거만, 처음 볼 때의 상태를 기준선으로 삼는다(기억 데이터는 바꾸지 않음).
+      for (const id of safeArray(item.sourceIds).map(String)) {
+        if (!id || id === "legacy-summary" || id.startsWith("am:") || fps[`summary:${id}`] || fps[`message:${id}`]) continue;
+        if (!SUMMARY_SOURCE_TYPES.has(item.sourceType) && !summaries.has(id)) continue;
+        const wkey = `${item.id}|summary:${id}`;
+        const current = summaries.get(id);
+        if (!(wkey in watch)) { watch[wkey] = current ?? "missing"; watchChanged = true; continue; }
+        const expected = watch[wkey];
+        if (expected === "ack") continue;
+        if (current === undefined) { if (expected !== "missing") reasons.push({ key: `summary:${id}`, watchKey: wkey, type: "missing", label: "근거 요약이 지금은 없어요" }); }
+        else if (expected === "missing") { watch[wkey] = current; watchChanged = true; }
+        else if (current !== expected) reasons.push({ key: `summary:${id}`, watchKey: wkey, type: "changed", label: "근거 요약 내용이 바뀌었어요", current });
+      }
+      if (reasons.length) result.push({ kind: "item", id: item.id, title: `${item.type === "promise" ? "약속" : "앵커"} · ${item.title}`, reasons });
+    }
+    if (messageFps) {
+      for (const entity of memory.entities) {
+        for (const fact of [...entity.currentFacts, ...entity.historyFacts]) {
+          const fps = safeArray(fact.source?.fingerprints);
+          if (fps.length && fps.some((fp) => !messageFps.has(fp))) result.push({ kind: "fact", id: fact.id, entityId: entity.id, title: `요소 · ${entity.name} · ${truncate(fact.text, 50)}`, reasons: [{ key: "message", type: "changed", label: "근거 메시지가 바뀌었거나 지워졌어요(스와이프 포함)" }] });
+        }
+      }
+    }
+    for (const row of extra) {
+      const reasons = check(row.fps);
+      if (reasons.length) result.push({ kind: row.kind, id: row.id, title: row.title, reasons });
+    }
+    if (watchChanged) {
+      const entries = Object.entries(watch);
+      state.sourceWatchByChat[chatId] = Object.fromEntries(entries.slice(-3000));
+      await saveUiState();
+    }
+    state.staleRecords = result;
+  }
+  function staleLayer() {
+    const rows = safeArray(state.staleRecords);
+    return `<div class="mmc-layer-backdrop" data-action="close-layer"><section class="mmc-layer mmc-source-layer" data-layer-stop>
+      <header><div><span class="mmc-kicker">SOURCE CHANGED</span><h3>근거가 바뀐 기억</h3><small>근거가 바뀌었거나 지워졌지만 기억은 그대로 RP에 들어가고 있어요. 확인하고 고치거나, 이대로 둘지 정해 주세요.</small></div><button class="mmc-icon-btn" data-action="close-layer">${SVG.close}</button></header>
+      <div class="mmc-layer-body"><div class="mmc-candidate-note">바뀐 요약·장면은 '새 요약' 검토 대기에도 다시 떠요. 그쪽에서 모델로 다시 정리할 수 있어요.</div>${rows.length ? `<div class="mmc-candidate-list">${rows.map((row, index) => `<article class="mmc-candidate mmc-hold-row"><span><b>${esc(truncate(row.title, 90))}</b>${row.reasons.map((r) => `<small>${esc(r.label)}</small>`).join("")}</span><span class="mmc-hold-actions">${row.kind === "item" ? `<button class="mmc-btn mmc-sm" data-action="edit-item" data-id="${esc(row.id)}">편집</button>` : row.kind === "fact" ? `<button class="mmc-btn mmc-sm" data-action="edit-element" data-id="${esc(row.entityId)}">요소 편집</button>` : typeof staleLayerEditButton === "function" ? staleLayerEditButton(row) : ""}<button class="mmc-btn mmc-sm mmc-ghost" data-action="stale-ack" data-index="${index}">이대로 둘게요</button></span></article>`).join("")}</div>` : '<div class="mmc-empty">근거가 바뀐 기억이 없어요.</div>'}</div>
+      <footer><button class="mmc-btn" data-action="stale-refresh">${SVG.sync}<span>다시 확인</span></button><div><button class="mmc-btn mmc-primary" data-action="close-layer">닫기</button></div></footer>
+    </section></div>`;
+  }
+  async function acknowledgeStale(index) {
+    const row = safeArray(state.staleRecords)[Number(index)];
+    if (!row) return;
+    const chatId = String(state.currentChat?.id || "");
+    const data = await freshOwnedData();
+    let changed = false;
+    if (row.kind === "item") {
+      const item = data.items.find((x) => x.id === row.id);
+      if (item) {
+        const fps = normalizeSourceFingerprints(item.sourceFingerprints);
+        for (const reason of row.reasons) {
+          if (reason.watchKey) { state.sourceWatchByChat[chatId] = { ...parseRecord(state.sourceWatchByChat[chatId]), [reason.watchKey]: "ack" }; continue; }
+          fps[reason.key] = reason.type === "changed" && reason.current ? reason.current : "ack";
+        }
+        if (Object.keys(fps).length) { item.sourceFingerprints = fps; changed = true; }
+      }
+    } else if (row.kind === "fact") {
+      for (const entity of data.elementMemory.entities) for (const fact of [...entity.currentFacts, ...entity.historyFacts]) {
+        if (fact.id !== row.id || !fact.source) continue;
+        fact.source = { ...fact.source, fingerprints: [], contentHash: "" };
+        changed = true;
+      }
+    } else if (typeof acknowledgeStaleLayer === "function") changed = acknowledgeStaleLayer(data, row) || changed;
+    await saveUiState();
+    if (changed) await persistData(data, { sync: false, silent: true });
+    state.staleRecords = safeArray(state.staleRecords).filter((_, i) => i !== Number(index));
+    if (!state.staleRecords.length) state.layer = null;
+    toast("이 기억은 지금 그대로 두고, 같은 근거 변화로는 다시 알리지 않을게요.");
+    render();
+  }
+
+  // ── v2.1 분기 확인 대기 ──
+  const BRANCH_HOLD_GROUPS = [
+    ["scopeReviewHold", "인물 범위 확인 대기", (row) => row.record?.title || row.kind],
+    ["items", "약속 · 기억 앵커", (row) => `${row.type === "promise" ? "약속" : "앵커"} · ${row.title}`],
+    ["episodes", "장면 기억", (row) => `장면 · ${row.title || "장면"}`],
+    ["threads", "진행 흐름", (row) => `흐름 · ${row.title}`],
+    ["threadEntries", "진행 흐름의 상태 기록", (row) => `흐름 '${row.threadTitle || ""}' · ${truncate(row.entry?.state || "", 60)}`],
+    ["entities", "요소 기억", (row) => `요소 · ${row.name}`],
+    ["facts", "요소 기억의 사실", (row) => `${row.entityName || "요소"} · ${truncate(row.fact?.text || "", 70)}`],
+    ["docs", "위키 문서", (row) => `위키 · ${row.title}`],
+  ];
+  function branchHoldLayer() {
+    const hold = normalizeBranchHold(state.currentData?.branchHold);
+    const groups = BRANCH_HOLD_GROUPS.map(([key, label, line]) => {
+      const rows = hold[key];
+      if (!rows.length) return "";
+      return `<section class="mmc-candidate-group"><div class="mmc-candidate-group-head"><span class="mmc-type-chip">${esc(label)}</span><div><b>${esc(label)} ${rows.length}개</b></div><div class="mmc-hold-group-actions"><button class="mmc-btn mmc-sm" data-action="branch-hold-keep" data-kind="${key}" data-index="all">모두 넣기</button></div></div><div class="mmc-candidate-list">${rows.map((row, index) => `<article class="mmc-candidate mmc-hold-row"><span><b>${esc(truncate(line(row), 90))}</b><small>${row.holdReason === "updated" ? "분기 시점 뒤에 부모에서 바뀐 기록 · 분기 시점의 옛 내용은 남아 있지 않아요" : "분기 시점 뒤에 부모에서 생긴 기록"}</small></span><span class="mmc-hold-actions"><button class="mmc-btn mmc-sm" data-action="branch-hold-keep" data-kind="${key}" data-index="${index}">이 분기에 넣기</button><button class="mmc-btn mmc-sm mmc-ghost" data-action="branch-hold-drop" data-kind="${key}" data-index="${index}">빼기</button></span></article>`).join("")}</div></section>`;
+    }).join("");
+    return `<div class="mmc-layer-backdrop" data-action="close-layer"><section class="mmc-layer mmc-source-layer" data-layer-stop>
+      <header><div><span class="mmc-kicker">BRANCH CHECK</span><h3>분기 확인 대기</h3><small>분기 시점 ${esc(sourceDate(hold.cutAt) || hold.cutAt || "")} 이후 부모 RP에서 생기거나 바뀐 기록이에요. 이 분기에는 넣지 않고 기다리는 중이에요.</small></div><button class="mmc-icon-btn" data-action="close-layer">${SVG.close}</button></header>
+      <div class="mmc-layer-body"><div class="mmc-candidate-note">'이 분기에 넣기'를 누르면 그 기록이 이 분기의 기억으로 들어가요. '빼기'는 이 분기 보관함에서만 지우고, 부모 RP의 기록은 그대로예요.</div>${groups || '<div class="mmc-empty">확인할 기록이 없어요.</div>'}</div>
+      <footer><button class="mmc-btn mmc-danger" data-action="branch-hold-drop" data-kind="all" data-index="all">모두 빼기</button><div><button class="mmc-btn" data-action="close-layer">나중에</button><button class="mmc-btn mmc-primary" data-action="branch-hold-keep" data-kind="all" data-index="all">모두 이 분기에 넣기</button></div></footer>
+    </section></div>`;
+  }
+  function restoreHeldRecord(data, key, row) {
+    if (key === "scopeReviewHold") { data.scopeReviewHold = [...safeArray(data.scopeReviewHold), structuredClone(row)]; return true; }
+    const clean = { ...row }; delete clean.holdReason;
+    if (key === "items") { if (!data.items.some((item) => item.id === clean.id)) data.items.unshift(normalizeItem(clean)); return true; }
+    if (key === "entities") {
+      const memory = data.elementMemory;
+      if (memory.entities.some((entity) => entity.id === clean.id)) return true;
+      if (memory.entities.length >= 400) return false;
+      memory.entities.push(normalizeElement(clean)); return true;
+    }
+    if (key === "facts") {
+      const entity = data.elementMemory.entities.find((row2) => row2.id === row.entityId);
+      if (!entity) return false;
+      const list = row.list === "historyFacts" ? "historyFacts" : "currentFacts";
+      if (![...entity.currentFacts, ...entity.historyFacts].some((fact) => fact.id === row.fact?.id)) entity[list].push(row.fact);
+      const balanced = balanceElementFacts(entity.currentFacts, entity.historyFacts);
+      entity.currentFacts = balanced.currentFacts; entity.historyFacts = balanced.historyFacts;
+      return true;
+    }
+    if (key === "docs") {
+      if (data.wiki.docs.some((doc) => doc.id === clean.id)) return true;
+      if (data.wiki.docs.length >= WIKI_DOC_LIMIT) return false;
+      data.wiki.docs.push(normalizeWikiDoc(clean)); return true;
+    }
+    if (typeof restoreHeldLayerRecord === "function") return restoreHeldLayerRecord(data, key, row);
+    return false;
+  }
+  async function resolveBranchHold(kind, index, keep) {
+    const data = await freshOwnedData();
+    const hold = normalizeBranchHold(data.branchHold);
+    const keys = kind === "all" ? BRANCH_HOLD_GROUPS.map(([key]) => key) : [kind];
+    let moved = 0; let failed = 0;
+    for (const key of keys) {
+      if (!Array.isArray(hold[key])) continue;
+      const picked = index === "all" ? hold[key].splice(0) : hold[key].splice(Number(index), 1);
+      const back = [];
+      for (const row of picked) {
+        if (!keep) { moved += 1; continue; }
+        if (restoreHeldRecord(data, key, row)) moved += 1; else { failed += 1; back.push(row); }
+      }
+      hold[key].unshift(...back);
+    }
+    data.branchHold = branchHoldCount(hold) ? hold : null;
+    await persistData(data, { silent: true });
+    if (!branchHoldCount(hold)) state.layer = null;
+    toast(`${keep ? `이 분기에 ${moved}개 넣었어요` : `이 분기에서 ${moved}개 뺐어요`}${failed ? ` · ${failed}개는 연결할 요소가 없거나 상한이라 남겨 뒀어요` : ""}`, failed > 0);
+    render();
+  }
+
   function layerMarkup() {
+    if (state.layer === "branch-hold") return branchHoldLayer();
+    if (state.layer === "stale") return staleLayer();
+    if (state.layer === "episode-editor") return episodeEditorLayer();
+    if (state.layer === "thread-editor") return threadEditorLayer();
     if (state.layer === "editor") return editorLayer();
     if (state.layer === "element-editor") return elementEditorLayer();
     if (state.layer === "element-candidates") return elementCandidateLayer();
@@ -4467,6 +6275,7 @@ When current and historical facts differ, current facts take precedence.`;
           <label class="mmc-field"><span>상태</span><select id="mmc-draft-status">${Object.entries(PROMISE_STATUS_LABEL).map(([id, label]) => `<option value="${id}" ${d.status === id ? "selected" : ""}>${label}</option>`).join("")}</select></label>
           <label class="mmc-field"><span>중요도</span><select id="mmc-draft-priority">${["high", "normal", "low"].map((p) => `<option value="${p}" ${d.priority === p ? "selected" : ""}>${PRIORITY_LABEL[p]}</option>`).join("")}</select></label>
         </div><label class="mmc-field"><span>예정·조건 <small>선택</small></span><input id="mmc-draft-schedule" value="${esc(d.scheduleText || "")}" placeholder="예: 이번 주말 / 퇴원 후 / 다음 비 오는 날"></label>`}
+        ${state.chatCharacters.length >= 2 || isRestrictedItem(d) ? `<div class="mmc-field"><span>아는 인물 <small>${restrictionEffective() ? "비우면 모든 인물이 아는 기억 · 고르면 그 인물에게만 들어가요" : "비우면 모든 인물이 아는 기억 · 병합 그룹이라 고르면 주입하지 않아요"}</small></span>${scopeControl("draft", 0, d.knownBy)}</div>` : ""}
         ${source}
       </div>
       <footer>${d.id ? `<button class="mmc-btn mmc-danger" data-action="delete-item" data-id="${esc(d.id)}">${SVG.trash}<span>삭제</span></button>` : `<span></span>`}<div><button class="mmc-btn" data-action="close-layer">취소</button><button class="mmc-btn mmc-primary" data-action="save-draft">저장</button></div></footer>
@@ -4476,10 +6285,12 @@ When current and historical facts differ, current facts take precedence.`;
   function sourceRow(row) {
     const checked = state.sourceSelected.has(String(row.id));
     const meta = state.sourceMode === "summaries"
-      ? `${row.origin === "automated" ? "자동 요약" : row.origin === "manual" ? "수동 요약" : "요약"}${row.messageCount ? ` · ${row.messageCount}개 메시지` : ""}`
+      ? row.sourceKind === AM_SCENE_SOURCE
+        ? `고급 메모리 장면${row.timeline ? ` · ${row.timeline}` : ""}${row.startIndex ? ` · #${row.startIndex}–${row.endIndex}` : ""}${sourceRowAudience(row).restricted ? ` · 일부만 앎${sourceRowAudience(row).audienceIds.length ? `: ${knownByLabel(sourceRowAudience(row).audienceIds)}` : ""}` : ""}`
+        : `${row.origin === "automated" ? "자동 요약" : row.origin === "manual" ? "수동 요약" : "요약"}${row.messageCount ? ` · ${row.messageCount}개 메시지` : ""}${hasCharacterConditions(row.content) ? " · 인물별 구간 있음" : ""}`
       : `${roleLabel(row.role)}${row.createdAt ? ` · ${sourceDate(row.createdAt)}` : ""}`;
     const title = state.sourceMode === "summaries" ? String(row.title || "요약") : truncate(String(row.content || ""), 72);
-    const body = state.sourceMode === "summaries" ? String(row.content || "") : String(row.content || "");
+    const body = state.sourceMode === "summaries" ? labelCharacterConditions(row.content) : String(row.content || "");
     return `<label class="mmc-source-row ${checked ? "is-selected" : ""}"><input type="checkbox" data-source-id="${esc(row.id)}" ${checked ? "checked" : ""}><span class="mmc-source-copy"><b>${esc(title)}</b><small>${esc(meta)}</small><p>${esc(truncate(body, 300))}</p></span></label>`;
   }
 
@@ -4504,6 +6315,7 @@ When current and historical facts differ, current facts take precedence.`;
       <header><div><span class="mmc-kicker">${isReview ? "SUMMARY UPDATE" : "SOURCE · READ ONLY"}</span><h3>${title}</h3></div><button class="mmc-icon-btn" data-action="close-layer">${SVG.close}</button></header>
       <div class="mmc-layer-body">
         ${isReview ? '<div class="mmc-candidate-note">새 요약 자체는 수정하지 않습니다. 필요한 기억만 약속/앵커에 반영한 뒤 이 알림을 검토 완료로 표시합니다.</div>' : ""}
+        ${state.sourceMode === "messages" && hiddenSkipNote("source") ? `<div class="mmc-candidate-note">${esc(hiddenSkipNote("source"))}</div>` : ""}
         <div class="mmc-source-toolbar"><button class="mmc-btn" data-action="source-select-all">전체 선택</button><button class="mmc-btn" data-action="source-clear">해제</button><span>${state.sourceSelected.size}개 선택 · 약 ${estimateTokens(sourceToText())} tokens</span></div>
         <div class="mmc-source-list">${state.sourceRows.length ? state.sourceRows.map(sourceRow).join("") : `<div class="mmc-empty">${empty}</div>`}</div>
         <section class="mmc-model-strip"><div><b>${modelTitle}</b><small>${modelHelp}</small></div><select id="mmc-source-model">${connectionOptions()}</select></section>
@@ -4512,12 +6324,43 @@ When current and historical facts differ, current facts take precedence.`;
     </section></div>`;
   }
 
+  // 아는 인물 고르기. 인물이 둘 이상인 RP에서만 고를 수 있다. 비우면 모두가 아는 기억이다.
+  function scopeControl(kind, index, knownByIds, { needsReview = false, confirmed = false } = {}) {
+    const ids = normalizeKnownBy(knownByIds);
+    const pending = needsReview && !confirmed && !ids.length;
+    const groupWarn = ids.length && !restrictionEffective() ? `<small class="mmc-scope-warn mmc-scope-group-warn">병합 그룹 모드에서는 인물별로 가려 넣을 수 없어 이 기억은 주입하지 않아요. 개별 응답 모드에서만 들어갑니다.</small>` : "";
+    const choices = [...state.chatCharacters, ...ids.filter(id => !state.chatCharacters.some(c => c.id === id)).map(id => ({ id, name: `${id} (미해결 · 주입 보류)` }))];
+    const chips = choices.map((c) => `<label class="mmc-scope-chip ${ids.includes(c.id) ? "is-on" : ""}"><input type="checkbox" data-scope-kind="${kind}" data-scope-index="${index}" data-scope-char="${esc(c.id)}" ${ids.includes(c.id) ? "checked" : ""}><span>${esc(c.name)}</span></label>`).join("");
+    const label = ids.length ? `${SVG.lock}아는 인물만 · ${esc(knownByLabel(ids))}` : confirmed || !needsReview ? "모두가 아는 기억" : "공개 범위 확인 필요";
+    const publicBtn = needsReview && !(confirmed && !ids.length) ? `<button type="button" class="mmc-btn mmc-sm mmc-ghost" data-action="scope-public" data-scope-kind="${kind}" data-scope-index="${index}">모두에게 공개</button>` : "";
+    const warn = pending ? `<small class="mmc-scope-warn">일부 인물만 아는 내용이 섞인 원문이에요. 아는 인물을 고르거나 '모두에게 공개'를 눌러야 적용돼요.</small>` : "";
+    return `<span class="mmc-scope ${pending ? "is-pending" : ids.length ? "is-restricted" : ""}"><small class="mmc-scope-label">${label}</small><span class="mmc-scope-chips">${chips}${publicBtn}</span>${warn}${groupWarn}</span>`;
+  }
+  // 편집 창에서는 다시 그리지 않으므로 이름표와 병합 그룹 경고만 바로 고친다.
+  function refreshDraftScopeDom(scopeEl) {
+    if (!scopeEl) return;
+    const ids = Array.from(scopeEl.querySelectorAll("input[data-scope-char]:checked")).map((box) => String(box.dataset.scopeChar || ""));
+    const label = scopeEl.querySelector(".mmc-scope-label");
+    if (label) label.innerHTML = ids.length ? `${SVG.lock}아는 인물만 · ${esc(knownByLabel(ids))}` : "모두가 아는 기억";
+    scopeEl.classList.toggle("is-restricted", ids.length > 0);
+    let warn = scopeEl.querySelector(".mmc-scope-group-warn");
+    if (ids.length && !restrictionEffective()) {
+      if (!warn) { warn = document.createElement("small"); warn.className = "mmc-scope-warn mmc-scope-group-warn"; scopeEl.append(warn); }
+      warn.textContent = "병합 그룹 모드에서는 인물별로 가려 넣을 수 없어 이 기억은 주입하지 않아요. 개별 응답 모드에서만 들어갑니다.";
+    } else warn?.remove();
+  }
+  function scopeTarget(kind, index) {
+    if (kind === "review") return state.reviewCandidates[Number(index)] || null;
+    if (kind === "candidate") return state.candidates[Number(index)] || null;
+    return episodeScopeTarget(kind, index) || threadScopeTarget(kind, index);
+  }
+
   function candidateRow(item, index) {
     const checked = state.candidateSelected.has(String(index));
     const detail = item.type === "anchor"
       ? ["앵커", ANCHOR_CATEGORY_LABEL[item.category] || "설정·사실", ANCHOR_LIFESPAN_LABEL[item.lifespan] || "영구"].join(" · ")
       : ["약속", PRIORITY_LABEL[item.priority] || "보통"].join(" · ");
-    return `<label class="mmc-candidate is-${item.type === "promise" ? "promise" : "anchor"} ${checked ? "is-selected" : ""}"><input type="checkbox" data-candidate-index="${index}" ${checked ? "checked" : ""}><span><b>${esc(item.title)}</b><small>${esc(detail)}</small><p>${esc(item.content)}</p>${safeArray(item.keywords).length ? `<em>${esc(item.keywords.join(" · "))}</em>` : ""}</span></label>`;
+    return `<label class="mmc-candidate is-${item.type === "promise" ? "promise" : "anchor"} ${checked ? "is-selected" : ""}"><input type="checkbox" data-candidate-index="${index}" ${checked ? "checked" : ""}><span><b>${esc(item.title)}</b><small>${esc(detail)}</small><p>${esc(item.content)}</p>${safeArray(item.keywords).length ? `<em>${esc(item.keywords.join(" · "))}</em>` : ""}${item.duplicateOf ? `<small class="mmc-scope-warn">중복 의심 · 같은 제목의 기록이 이미 있어요. 기존 기록을 고치는 편이 나을 수 있어요.</small>` : ""}${scopeControl("candidate", index, item.knownByIds, { needsReview: item.scopeNeedsReview, confirmed: item.scopeConfirmed })}</span></label>`;
   }
 
   function candidateGroup(type) {
@@ -4533,11 +6376,11 @@ When current and historical facts differ, current facts take precedence.`;
   }
 
   function candidateLayer() {
-    const groups = `${candidateGroup("promise")}${candidateGroup("anchor")}`;
+    const groups = `${candidateGroup("promise")}${threadCandidateGroup("cand", state.candThreads, state.candThreadSelected)}${candidateGroup("anchor")}${episodeCandidateGroup("cand", state.candEpisodes, state.candEpisodeSelected)}`;
     return `<div class="mmc-layer-backdrop" data-action="close-layer"><section class="mmc-layer mmc-source-layer" data-layer-stop>
       <header><div><span class="mmc-kicker">MODEL SUGGESTIONS</span><h3>약속 · 기억 앵커 후보</h3></div><button class="mmc-icon-btn" data-action="close-layer">${SVG.close}</button></header>
-      <div class="mmc-layer-body"><div class="mmc-candidate-note">한 번의 모델 정리 결과를 약속과 기억 앵커로 나눠 표시합니다. 체크한 항목만 실제 보관함에 저장되며, 선택한 후보는 각 분류 안에서 위쪽으로 모입니다.</div><div class="mmc-candidate-toolbar"><b data-selected-count="candidate">선택됨 ${state.candidateSelected.size}개</b><small>저장 전 닫기에는 확인창이 표시됩니다.</small></div>${groups || '<div class="mmc-empty">후보를 찾지 못했습니다.</div>'}</div>
-      <footer><span></span><div><button class="mmc-btn" data-action="close-layer">취소</button><button class="mmc-btn mmc-primary" data-action="save-candidates" ${state.candidateSelected.size ? "" : "disabled"}>선택 ${state.candidateSelected.size}개 추가</button></div></footer>
+      <div class="mmc-layer-body"><div class="mmc-candidate-note">한 번의 모델 정리 결과를 약속과 기억 앵커로 나눠 표시합니다. 체크한 항목만 실제 보관함에 저장되며, 선택한 후보는 각 분류 안에서 위쪽으로 모입니다.</div>${bulkToolbar("candidate", "저장 전 닫기에는 확인창이 표시됩니다.")}${groups || '<div class="mmc-empty">후보를 찾지 못했습니다.</div>'}</div>
+      <footer><span></span><div><button class="mmc-btn" data-action="close-layer">취소</button><button class="mmc-btn mmc-primary" data-action="save-candidates" ${state.candidateSelected.size || state.candEpisodeSelected.size || state.candThreadSelected.size ? "" : "disabled"}>선택 ${state.candidateSelected.size + state.candEpisodeSelected.size + state.candThreadSelected.size}개 추가</button></div></footer>
     </section></div>`;
   }
 
@@ -4549,7 +6392,9 @@ When current and historical facts differ, current facts take precedence.`;
     const content = item.content || existing?.content || item.reason || "";
     const detail = [REVIEW_ACTION_LABEL[item.action] || item.action, REVIEW_TYPE_LABEL[item.type] || item.type, item.category ? ANCHOR_CATEGORY_LABEL[item.category] : "", item.type === "anchor" ? ANCHOR_LIFESPAN_LABEL[item.lifespan] : ""].filter(Boolean).join(" · ");
     const before = existing && ["update", "complete", "archive"].includes(item.action) ? `<small class="mmc-review-before">기존: ${esc(truncate(existing.content || existing.title, 150))}</small>` : "";
-    return `<label class="mmc-candidate mmc-review-candidate is-${item.type === "promise" ? "promise" : "anchor"} ${checked ? "is-selected" : ""} ${conflict ? "is-conflict" : ""}"><input type="checkbox" data-review-index="${index}" ${checked ? "checked" : ""} ${item.action === "keep" || conflict ? "disabled" : ""}><span><b>${esc(title)}</b><small><strong data-review-action="${esc(item.action)}">${esc(detail)}</strong></small>${conflict ? '<small class="mmc-conflict-note">충돌 · 후보 생성 뒤 원본이 수정되어 자동 적용하지 않습니다.</small>' : ""}${before}<p>${esc(content)}</p>${item.reason ? `<em>${esc(item.reason)}</em>` : ""}</span></label>`;
+    const dup = item.action === "add" && item.duplicateOf ? safeArray(state.currentData?.items).find((row) => row.id === item.duplicateOf) : null;
+    const dupNote = dup ? `<small class="mmc-scope-warn">중복 의심 · 이미 '${esc(truncate(dup.title, 40))}' 기록이 있어요. 새로 추가하면 같은 일이 두 번 쌓여요. <button type="button" class="mmc-btn mmc-sm mmc-ghost" data-action="review-to-update" data-index="${index}">기존 기록 갱신으로 바꾸기</button></small>` : "";
+    return `<label class="mmc-candidate mmc-review-candidate is-${item.type === "promise" ? "promise" : "anchor"} ${checked ? "is-selected" : ""} ${conflict ? "is-conflict" : ""}"><input type="checkbox" data-review-index="${index}" ${checked ? "checked" : ""} ${item.action === "keep" || conflict ? "disabled" : ""}><span><b>${esc(title)}</b><small><strong data-review-action="${esc(item.action)}">${esc(detail)}</strong></small>${conflict ? '<small class="mmc-conflict-note">충돌 · 후보 생성 뒤 원본이 수정되어 자동 적용하지 않습니다.</small>' : ""}${before}${dupNote}<p>${esc(content)}</p>${item.reason ? `<em>${esc(item.reason)}</em>` : ""}${["add", "update"].includes(item.action) ? scopeControl("review", index, item.knownByIds, { needsReview: item.scopeNeedsReview, confirmed: item.scopeConfirmed }) : ""}</span></label>`;
   }
 
   function reviewCandidateGroup(type) {
@@ -4564,12 +6409,12 @@ When current and historical facts differ, current facts take precedence.`;
   }
 
   function reviewCandidateLayer() {
-    const actionable = state.reviewCandidates.some((item) => item.action !== "keep");
-    const groups = `${reviewCandidateGroup("promise")}${reviewCandidateGroup("anchor")}`;
+    const actionable = state.reviewCandidates.some((item) => item.action !== "keep") || state.reviewEpisodes.length > 0 || state.reviewThreads.length > 0;
+    const groups = `${reviewCandidateGroup("promise")}${threadCandidateGroup("rev", state.reviewThreads, state.reviewThreadSelected)}${reviewCandidateGroup("anchor")}${episodeCandidateGroup("rev", state.reviewEpisodes, state.reviewEpisodeSelected)}`;
     return `<div class="mmc-layer-backdrop" data-action="close-layer"><section class="mmc-layer mmc-source-layer" data-layer-stop>
       <header><div><span class="mmc-kicker">MEMORY UPDATE REVIEW</span><h3>약속 · 앵커 갱신 제안</h3></div><button class="mmc-icon-btn" data-action="close-layer">${SVG.close}</button></header>
-      <div class="mmc-layer-body"><div class="mmc-candidate-note">새 요약과 현재 기록을 비교한 결과입니다. 약속과 기억 앵커를 분리해 표시하며 ADD/UPDATE/COMPLETE/ARCHIVE는 체크한 것만 적용됩니다. KEEP은 참고 표시입니다.</div><div class="mmc-candidate-toolbar"><b data-selected-count="review">선택됨 ${state.reviewSelected.size}개</b><small>적용 전 닫기에는 확인창이 표시됩니다.</small></div>${groups || '<div class="mmc-empty">새로 반영할 기억을 찾지 못했습니다. 아래 버튼으로 이번 요약을 검토 완료 처리할 수 있습니다.</div>'}</div>
-      <footer><div><button class="mmc-btn mmc-danger" data-action="discard-review">후보 폐기</button><button class="mmc-btn" data-action="review-mark-done">이번 요약 검토 완료</button></div><div><button class="mmc-btn" data-action="close-layer">나중에</button><button class="mmc-btn mmc-primary" data-action="apply-review" ${state.reviewSelected.size && actionable ? "" : "disabled"}>선택 ${state.reviewSelected.size}개 적용</button></div></footer>
+      <div class="mmc-layer-body"><div class="mmc-candidate-note">새 요약과 현재 기록을 비교한 결과입니다. 약속과 기억 앵커를 분리해 표시하며 ADD/UPDATE/COMPLETE/ARCHIVE는 체크한 것만 적용됩니다. KEEP은 참고 표시입니다.</div>${bulkToolbar("review", "전체 보류는 선택만 풀어요. 후보는 승인 대기에 남아요.")}${groups || '<div class="mmc-empty">새로 반영할 기억을 찾지 못했습니다. 아래 버튼으로 이번 요약을 검토 완료 처리할 수 있습니다.</div>'}</div>
+      <footer><div><button class="mmc-btn mmc-danger" data-action="discard-review">후보 폐기</button><button class="mmc-btn" data-action="review-mark-done">이번 요약 검토 완료</button></div><div><button class="mmc-btn" data-action="close-layer">나중에</button><button class="mmc-btn mmc-primary" data-action="apply-review" ${(state.reviewSelected.size || state.reviewEpisodeSelected.size || state.reviewThreadSelected.size) && actionable ? "" : "disabled"}>선택 ${state.reviewSelected.size + state.reviewEpisodeSelected.size + state.reviewThreadSelected.size}개 적용</button></div></footer>
     </section></div>`;
   }
 
@@ -4590,7 +6435,7 @@ When current and historical facts differ, current facts take precedence.`;
     const order = state.healthCandidates.map((_, index) => index).sort((a, b) => Number(state.healthSelected.has(String(b))) - Number(state.healthSelected.has(String(a))));
     return `<div class="mmc-layer-backdrop" data-action="close-layer"><section class="mmc-layer mmc-source-layer" data-layer-stop>
       <header><div><span class="mmc-kicker">MEMORY HEALTH CHECK</span><h3>기억 건강검진</h3></div><button class="mmc-icon-btn" data-action="close-layer">${SVG.close}</button></header>
-      <div class="mmc-layer-body"><div class="mmc-candidate-note">현재 약속·앵커와 최근 요약을 비교해 중복, 모순, 오래된 현재 상태, 끝난 사건, 지나치게 긴 기억을 점검했습니다. 모델은 제안만 하며 체크한 변경만 적용됩니다. 새 사실을 임의로 추가하지 않습니다.</div><div class="mmc-candidate-toolbar"><b data-selected-count="health">선택됨 ${state.healthSelected.size}개</b><small>적용 전 닫기에는 확인창이 표시됩니다.</small></div><div class="mmc-candidate-list">${state.healthCandidates.length ? order.map((index) => healthCandidateRow(state.healthCandidates[index], index)).join("") : '<div class="mmc-empty">정리할 문제를 찾지 못했습니다. 현재 기억 상태를 그대로 유지해도 됩니다.</div>'}</div></div>
+      <div class="mmc-layer-body"><div class="mmc-candidate-note">현재 약속·앵커와 최근 요약을 비교해 중복, 모순, 오래된 현재 상태, 끝난 사건, 지나치게 긴 기억을 점검했습니다. 모델은 제안만 하며 체크한 변경만 적용됩니다. 새 사실을 임의로 추가하지 않습니다.</div>${bulkToolbar("health", "적용 전 닫기에는 확인창이 표시됩니다.")}<div class="mmc-candidate-list">${state.healthCandidates.length ? order.map((index) => healthCandidateRow(state.healthCandidates[index], index)).join("") : '<div class="mmc-empty">정리할 문제를 찾지 못했습니다. 현재 기억 상태를 그대로 유지해도 됩니다.</div>'}</div></div>
       <footer><span></span><div><button class="mmc-btn" data-action="close-layer">닫기</button><button class="mmc-btn mmc-primary" data-action="apply-health" ${state.healthSelected.size && actionable ? "" : "disabled"}>선택 ${state.healthSelected.size}개 적용</button></div></footer>
     </section></div>`;
   }
@@ -4644,22 +6489,37 @@ When current and historical facts differ, current facts take precedence.`;
     if (!result.ok) throw new Error("아직 JSON 후보를 읽지 못했습니다. JSON 배열/객체 부분만 남기거나 문법을 조금 고쳐 다시 시도해 주세요.");
     if (recovery.kind === "candidate") {
       const parsed = result.rows.map(normalizeCandidate).filter(Boolean).slice(0, 12);
-      if (!parsed.length && result.rows.length) throw new Error("JSON은 읽었지만 후보 필드(title/content 등)를 해석하지 못했습니다.");
       const rows = selectedSourceRows();
+      const episodeCands = extractEpisodeCandidates(result.rows, rows, state.sourceMode);
+      const threadCands = extractThreadCandidates(result.rows, rows, state.sourceMode);
+      if (!parsed.length && !episodeCands.length && !threadCands.length && result.rows.length) throw new Error("JSON은 읽었지만 후보 필드(title/content 등)를 해석하지 못했습니다.");
+      state.candThreads = threadCands;
+      state.candThreadSelected = preselectThreads(threadCands);
+      state.candEpisodes = episodeCands;
+      state.candEpisodeSelected = preselectEpisodes(episodeCands);
+      state.candBatch = { fps: sourceFingerprintsForRows(rows, state.sourceMode), sourceIds: rows.map((row) => String(row.id || "")).filter(Boolean), rows: rows.map((row) => ({ createdAt: row.createdAt, updatedAt: row.updatedAt, endIndex: row.endIndex })) };
       const quote = sourceToText(rows).slice(0, 12000);
       const ids = rows.map((row) => String(row.id || "")).filter(Boolean);
-      state.candidates = parsed.map((item) => ({ ...item, id: "", sourceType: "model", sourceIds: ids, sourceQuote: quote }));
-      state.candidateSelected = new Set(parsed.map((_, i) => String(i)));
+      const fps = sourceFingerprintsForRows(rows, state.sourceMode);
+      state.candidates = parsed.map((item) => ({ ...item, id: "", candidateId: uid("cand"), sourceType: "model", sourceIds: ids, sourceQuote: quote, ...(Object.keys(fps).length ? { sourceFingerprints: fps } : {}) }));
+      if (state.sourceMode === "summaries") markScopeReview(state.candidates, rows);
+      for (const cand of state.candidates) { const dup = safeArray(state.currentData?.items).find((row) => row.type === cand.type && titleKey(row.title) && titleKey(row.title) === titleKey(cand.title)); if (dup) cand.duplicateOf = dup.id; }
+      state.candidateSelected = new Set(state.candidates.map((item, i) => scopeBlocksApply(item) || item.duplicateOf ? null : String(i)).filter(Boolean));
       state.rawRecovery = null;
       state.layer = "candidates";
       toast(result.repaired ? "모델 응답을 보정해 후보를 복구했습니다." : "모델 응답에서 후보를 복구했습니다.");
       return;
     }
     const normalized = result.rows.map(normalizeReviewCandidate).filter((item) => item && (recovery.kind !== "health" || item.action !== "add")).slice(0, 20);
-    if (!normalized.length && result.rows.length) throw new Error("JSON은 읽었지만 action/type/targetId 같은 후보 필드를 해석하지 못했습니다.");
+    if (!normalized.length && result.rows.length && !(recovery.kind === "review" && (extractEpisodeCandidates(result.rows, safeArray(recovery.rows), "summaries").length || extractThreadCandidates(result.rows, safeArray(recovery.rows), "summaries").length))) throw new Error("JSON은 읽었지만 action/type/targetId 같은 후보 필드를 해석하지 못했습니다.");
     if (recovery.kind === "review") {
       state.reviewCandidates = normalized;
-      state.reviewSelected = new Set(normalized.map((item, i) => item.action === "keep" ? null : String(i)).filter(Boolean));
+      state.reviewEpisodes = extractEpisodeCandidates(result.rows, safeArray(recovery.rows), "summaries");
+      state.reviewEpisodeSelected = preselectEpisodes(state.reviewEpisodes);
+      state.reviewThreads = extractThreadCandidates(result.rows, safeArray(recovery.rows), "summaries");
+      state.reviewThreadSelected = preselectThreads(state.reviewThreads);
+      markScopeReview(state.reviewCandidates, safeArray(recovery.rows));
+      state.reviewSelected = new Set(normalized.map((item, i) => item.action === "keep" || scopeBlocksApply(item) ? null : String(i)).filter(Boolean));
       state.reviewSourceRows = safeArray(recovery.rows).slice();
       await persistPendingReview();
       state.rawRecovery = null;
@@ -4756,6 +6616,8 @@ When current and historical facts differ, current facts take precedence.`;
             <label class="mmc-setting"><span><b>약속 상시 주입 상한</b><small>중요도 순으로 이 개수까지만 넣어요.</small></span><input id="mmc-max-promises" type="number" min="1" max="20" value="${data.maxPromises}"></label>
             <label class="mmc-setting"><span><b>항상 기억 앵커 상한</b><small>키워드 앵커는 조건부라 이 숫자에 들어가지 않아요.</small></span><input id="mmc-max-anchors" type="number" min="1" max="24" value="${data.maxAnchors}"></label>
             <label class="mmc-setting"><span><b>상시 앵커 기억 예산</b><small>항상 기억 앵커 본문에 쓸 최대 글자 수 · 600~12000자.</small></span><input id="mmc-anchor-budget" type="number" min="600" max="12000" step="100" value="${data.anchorBudgetChars}"></label>
+            <label class="mmc-setting"><span><b>장면 기억 넣기</b><small>장소·키워드가 대화에 나올 때 그 장면의 '현재' 사실만 넣어요. 끄면 보관만 해요.</small></span><input id="mmc-episode-injection" type="checkbox" ${episodeInjectionOn(data) ? "checked" : ""}></label>
+            <label class="mmc-setting"><span><b>상시 기억 총 상한</b><small>약속·항상 앵커·진행 흐름을 합친 대략의 tokens. 넘치면 '중요'가 아닌 오래된 기록부터 대기로 돌려요. 0이면 끔.</small></span><input id="mmc-total-budget" type="number" min="0" max="20000" step="100" value="${Number(data.alwaysBudgetTokens) || 0}"></label>
           </section>`)}
         ${pane("auto", `
           <section class="mmc-set-card">
@@ -4771,6 +6633,7 @@ When current and historical facts differ, current facts take precedence.`;
           <label class="mmc-setting-block"><span><b>모델 정리 추가 지침</b><small>개인 취향만 덧붙이세요. 예: 사소한 취향은 앵커로 만들지 말 것 / 관계 변화와 신체 상태를 우선.</small></span><textarea id="mmc-review-extra" rows="4" placeholder="선택 사항">${esc(state.reviewExtraInstruction || "")}</textarea></label>`)}
         ${pane("data", `
           <div class="mmc-setting-card"><div><b>기억 데이터 가져오기 · 내보내기</b><small>Marinara memoryCabinetV1 JSON, 보관함 로어북의 구조화 백업, SillyTavern 보관함 JSON을 지원해요. 확장 설치 ZIP에는 RP 기억이 들어 있지 않아요.</small></div><div class="mmc-inline-actions"><button class="mmc-btn" data-action="import-memory">JSON 가져오기</button><button class="mmc-btn" data-action="export-memory" ${state.currentData ? "" : "disabled"}>JSON 내보내기</button></div></div>
+          ${scopeReviewMarkup()}
           <p class="mmc-muted">World Info의 MemoryVault_ 파일은 자동 관리됩니다. 직접 연결할 필요 없이 현재 채팅에서만 스캔해요. 실제 주입량은 SillyTavern World Info 예산의 영향을 받아요.</p>
           <div class="mmc-setting-card"><div><b>전용 로어북</b><small>${data.lorebookId ? `연결 ID ${esc(data.lorebookId)}` : "아직 생성되지 않음"}${data.lastSyncAt ? ` · 최근 동기화 ${esc(sourceDate(data.lastSyncAt))}` : ""}</small>${data.lastSyncError ? `<em>${esc(data.lastSyncError)}</em>` : ""}</div><button class="mmc-btn" data-action="sync" ${ownershipAllowsData() ? "" : "disabled"}>${SVG.sync}<span>다시 동기화</span></button></div>
           <div class="mmc-setting-card"><div><b>기존 약속보관함 기록 가져오기</b><small>${legacy ? "이 RP에서 기존 promiseKeeperV1 데이터를 찾았어요. 원본은 그대로 두고 기억 보관함으로 복사해요." : "이 RP에서는 기존 약속보관함 데이터를 찾지 못했어요."}</small></div><button class="mmc-btn" data-action="import-legacy" ${legacy ? "" : "disabled"}>복사해 가져오기</button></div>
@@ -4800,6 +6663,9 @@ When current and historical facts differ, current facts take precedence.`;
     render();
   }
 
+  function syncFailSuffix() {
+    return state.currentData?.lastSyncError ? " · 로어북 동기화는 실패했어요(머리줄 동기화 버튼으로 다시 시도)" : "";
+  }
   function toast(message, error = false) {
     let node = document.getElementById(TOAST_ID);
     if (!node) {
@@ -4908,9 +6774,12 @@ When current and historical facts differ, current facts take precedence.`;
     try {
       await loadUiState();
       await loadChats();
+      const onScreen = hostActiveChatId();
+      if (onScreen && onScreen !== state.selectedChatId && state.chats.some((chat) => chat.id === onScreen)) state.selectedChatId = onScreen;
       await loadCurrentChat();
       await loadConnections();
-      await checkNewSummaries({ refreshChat: false, baselineIfUnknown: true, renderAfter: false });
+      await checkNewSummaries({ refreshChat: false, refreshScenes: true, baselineIfUnknown: true, renderAfter: false });
+      try { await refreshStaleRecords(); } catch (error) { console.warn("[기억 보관함] source check failed", error); }
       saveUiState();
     } catch (error) {
       console.error("[기억 보관함] load failed", error);
@@ -4928,6 +6797,8 @@ When current and historical facts differ, current facts take precedence.`;
     state.draft.title = String(document.getElementById("mmc-draft-title")?.value || "").trim();
     state.draft.content = String(document.getElementById("mmc-draft-content")?.value || "").trim();
     state.draft.priority = String(document.getElementById("mmc-draft-priority")?.value || "normal");
+    const scopeBoxes = Array.from(document.querySelectorAll('[data-scope-kind="draft"]'));
+    if (scopeBoxes.length) state.draft.knownBy = scopeBoxes.filter((box) => box.checked).map((box) => String(box.dataset.scopeChar || ""));
     if (state.draft.type === "anchor") {
       state.draft.category = String(document.getElementById("mmc-draft-category")?.value || "setting");
       state.draft.activation = String(document.getElementById("mmc-draft-activation")?.value || "always") === "keyword" ? "keyword" : "always";
@@ -4943,7 +6814,7 @@ When current and historical facts differ, current facts take precedence.`;
 
   function selectedSourceRows() { return state.sourceRows.filter((row) => state.sourceSelected.has(String(row.id))); }
   function sourceToText(rows = selectedSourceRows()) {
-    if (state.sourceMode === "summaries") return rows.map((row) => `[${row.title || "요약"}]\n${row.content || ""}`).join("\n\n");
+    if (state.sourceMode === "summaries") return rows.map(summaryRowText).join("\n\n");
     return rows.map((row) => `${roleLabel(row.role)}: ${row.content || ""}`).join("\n\n");
   }
 
@@ -4960,9 +6831,14 @@ When current and historical facts differ, current facts take precedence.`;
         let entries = safeArray(meta.summaryEntries).filter((row) => row && String(row.content || "").trim());
         if (!entries.length && String(meta.summary || "").trim()) entries = [{ id: "legacy-summary", title: "현재 통합 요약", content: String(meta.summary), origin: "legacy", enabled: true }];
         state.sourceRows = entries.filter((row) => row.enabled !== false).slice().sort((a, b) => String(b.updatedAt || b.createdAt || "").localeCompare(String(a.updatedAt || a.createdAt || ""))).slice(0, 80);
+        if (advancedMemoryEnabled()) {
+          // 고급 메모리 장면 요약도 고를 수 있다. 최근 장면이 위에 온다. 읽기만 한다.
+          await refreshAdvancedMemoryScenes(String(state.selectedChatId || ""));
+          state.sourceRows = [...state.amSceneRows.slice().reverse().slice(0, 80), ...state.sourceRows];
+        }
       } else {
         const payload = await api(`chats/${encodeURIComponent(state.selectedChatId)}/messages?limit=120`);
-        state.sourceRows = extractArray(payload, ["messages", "items", "results"]).filter((row) => ["user", "assistant"].includes(String(row.role || "")) && String(row.content || "").trim()).slice(-80).reverse();
+        state.sourceRows = readableMessages(extractArray(payload, ["messages", "items", "results"]), "source").slice(-80).reverse();
       }
       state.layer = "source";
     } finally {
@@ -4990,6 +6866,7 @@ When current and historical facts differ, current facts take precedence.`;
         sourceType: state.sourceMode === "summaries" ? "summary" : "message",
         sourceIds,
         sourceQuote,
+        sourceFingerprints: sourceFingerprintsForRows(rows, state.sourceMode),
       });
     } else {
       state.draft = normalizePromise({
@@ -4999,6 +6876,7 @@ When current and historical facts differ, current facts take precedence.`;
         sourceType: state.sourceMode === "summaries" ? "summary" : "message",
         sourceIds,
         sourceQuote,
+        sourceFingerprints: sourceFingerprintsForRows(rows, state.sourceMode),
       });
     }
     state.draft.id = "";
@@ -5208,8 +7086,9 @@ When current and historical facts differ, current facts take precedence.`;
     if (!title || !content || !type) return null;
     const titleKo = String(row.titleKo || "").trim();
     const contentKo = String(row.contentKo || "").trim();
-    if (type === "promise") return normalizePromise({ id: "", title, content, titleKo, contentKo, priority: row.priority, scheduleText: row.scheduleText || row.schedule || "", sourceType: "model" });
-    return normalizeAnchor({ id: "", title, content, titleKo, contentKo, category: row.category, priority: row.priority, activation: row.activation, keywords: safeArray(row.keywords), lifespan: row.lifespan, sourceType: "model" });
+    const scope = candidateScope(row, null);
+    if (type === "promise") return { ...normalizePromise({ id: "", title, content, titleKo, contentKo, priority: row.priority, scheduleText: row.scheduleText || row.schedule || "", sourceType: "model" }), ...scope };
+    return { ...normalizeAnchor({ id: "", title, content, titleKo, contentKo, category: row.category, priority: row.priority, activation: row.activation, keywords: safeArray(row.keywords), lifespan: row.lifespan, sourceType: "model" }), ...scope };
   }
 
   function modelSystemPrompt() {
@@ -5228,6 +7107,9 @@ When current and historical facts differ, current facts take precedence.`;
       "When the source is not Korean, also return titleKo and contentKo with a short Korean rendering for display only.",
       LANGUAGE_CONTRACT,
       KEYWORD_LANGUAGE_CONTRACT,
+      SCOPE_CONTRACT,
+      EPISODE_CONTRACT,
+      THREAD_CONTRACT,
     ].join("\n");
   }
 
@@ -5244,6 +7126,9 @@ When current and historical facts differ, current facts take precedence.`;
       "Do not invent facts. If nothing should change, return [].",
       LANGUAGE_CONTRACT,
       KEYWORD_LANGUAGE_CONTRACT,
+      SCOPE_CONTRACT,
+      EPISODE_CONTRACT,
+      THREAD_CONTRACT,
     ].join("\n");
     return [state.reviewPrompt || DEFAULT_REVIEW_PROMPT, state.reviewExtraInstruction ? `[USER EXTRA INSTRUCTION]\n${state.reviewExtraInstruction}` : "", schema].filter(Boolean).join("\n\n");
   }
@@ -5252,9 +7137,38 @@ When current and historical facts differ, current facts take precedence.`;
     return safeArray(state.currentData?.items).filter((item) => {
       if (item.type === "promise") return item.status === "active" || item.status === "hold";
       return item.type === "anchor" && item.active && !item.archived;
-    }).map((item) => item.type === "promise"
-      ? { id: item.id, type: "promise", title: item.title, content: item.content, status: item.status, priority: item.priority, scheduleText: item.scheduleText }
-      : { id: item.id, type: "anchor", title: item.title, content: item.content, category: item.category, priority: item.priority, activation: item.activation, keywords: item.keywords, lifespan: item.lifespan });
+    }).map((item) => {
+      const scope = isRestrictedItem(item) ? { knownBy: normalizeKnownBy(item.knownBy).map(characterName) } : {};
+      return item.type === "promise"
+        ? { id: item.id, type: "promise", title: item.title, content: item.content, status: item.status, priority: item.priority, scheduleText: item.scheduleText, ...scope }
+        : { id: item.id, type: "anchor", title: item.title, content: item.content, category: item.category, priority: item.priority, activation: item.activation, keywords: item.keywords, lifespan: item.lifespan, ...scope };
+    });
+  }
+
+  // 후보의 공개 범위. 저장된 후보는 이미 풀린 knownByIds를, 모델 응답은 이름 목록 knownBy를 쓴다.
+  function candidateScope(row, existing) {
+    const stored = Array.isArray(row.knownByIds);
+    let knownByIds = stored ? normalizeKnownBy(row.knownByIds) : [];
+    let unknown = stored ? normalizeTextList(row.scopeUnknown, 8, 80) : [];
+    let modelSaidAll = row.modelSaidAll === true;
+    if (!stored) {
+      const raw = Array.isArray(row.knownBy) ? row.knownBy : (typeof row.knownBy === "string" && row.knownBy.trim() ? [row.knownBy] : []);
+      modelSaidAll = raw.some((value) => String(value).trim().toLocaleLowerCase() === "all");
+      const resolved = resolveCharacterRefs(raw.filter((value) => String(value).trim().toLocaleLowerCase() !== "all"));
+      knownByIds = [...resolved.ids, ...resolved.unknown]; unknown = resolved.unknown;
+      if (!knownByIds.length && !modelSaidAll && existing && isRestrictedItem(existing)) knownByIds = normalizeKnownBy(existing.knownBy);
+    }
+    return { knownByIds, scopeUnknown: unknown, modelSaidAll, scopeNeedsReview: row.scopeNeedsReview === true || unknown.length > 0, scopeConfirmed: row.scopeConfirmed === true };
+  }
+  // 일부 인물만 아는 원문에서 나온 후보는 범위를 확인하기 전에는 '모두 공개'로 저장하지 않는다.
+  function scopeBlocksApply(candidate) {
+    return (safeArray(candidate?.scopeUnknown).length > 0 && candidate?.scopeConfirmed !== true) || (candidate?.scopeNeedsReview === true && candidate?.scopeConfirmed !== true && !normalizeKnownBy(candidate?.knownByIds).length);
+  }
+  function markScopeReview(candidates, rows) {
+    const restricted = batchHasRestricted(rows);
+    if (!restricted) return false;
+    for (const candidate of candidates) candidate.scopeNeedsReview = true;
+    return true;
   }
 
   function normalizeReviewCandidate(row) {
@@ -5270,7 +7184,10 @@ When current and historical facts differ, current facts take precedence.`;
     const title = String(row.title || existing?.title || "").trim();
     const content = String(row.content || row.text || existing?.content || "").trim();
     if (["add", "update"].includes(action) && (!title || !content)) return null;
-    const base = { candidateId: String(row.candidateId || uid("rvc")), action, type, targetId, baseUpdatedAt: String(row.baseUpdatedAt || existing?.updatedAt || ""), title, content, titleKo: String(row.titleKo || "").trim(), contentKo: String(row.contentKo || "").trim(), reason: String(row.reason || "").trim(), priority: ["high", "normal", "low"].includes(row.priority) ? row.priority : existing?.priority || "normal" };
+    const dupOf = action === "add" && !row.duplicateChecked
+      ? safeArray(state.currentData?.items).find((item) => item.type === type && titleKey(item.title) && titleKey(item.title) === titleKey(row.title) && (item.type === "promise" ? item.status !== "cancelled" : !item.archived))
+      : null;
+    const base = { ...candidateScope(row, existing), duplicateOf: String(row.duplicateOf || dupOf?.id || ""), duplicateChecked: true, candidateId: String(row.candidateId || uid("rvc")), action, type, targetId, baseUpdatedAt: String(row.baseUpdatedAt || existing?.updatedAt || ""), title, content, titleKo: String(row.titleKo || "").trim(), contentKo: String(row.contentKo || "").trim(), reason: String(row.reason || "").trim(), priority: ["high", "normal", "low"].includes(row.priority) ? row.priority : existing?.priority || "normal" };
     if (type === "promise") return { ...base, scheduleText: String(row.scheduleText || row.schedule || existing?.scheduleText || "") };
     return { ...base, category: Object.prototype.hasOwnProperty.call(ANCHOR_CATEGORY_LABEL, row.category) ? row.category : existing?.category || "setting", activation: row.activation === "keyword" ? "keyword" : row.activation === "always" ? "always" : existing?.activation || "always", keywords: safeArray(row.keywords).map((x) => String(x).trim()).filter(Boolean).slice(0, 8), lifespan: Object.prototype.hasOwnProperty.call(ANCHOR_LIFESPAN_LABEL, row.lifespan) ? row.lifespan : existing?.lifespan || "permanent" };
   }
@@ -5317,7 +7234,7 @@ When current and historical facts differ, current facts take precedence.`;
           }
         } catch {}
       }
-      const snapshot = reviewMemorySnapshot();
+      const snapshot = reviewMemorySnapshot().filter((row) => !row.knownBy);
       const plan = anchorInjectionPlan();
       const evidenceText = evidence.length ? sourceToTextForSummaryRows(evidence).slice(0, 50000) : "(No recent summary evidence available. In this case only suggest safe duplicate/compression maintenance; do not infer completion or obsolescence.)";
       const payload = await api("generate/raw", {
@@ -5347,7 +7264,7 @@ When current and historical facts differ, current facts take precedence.`;
   }
 
   function sourceToTextForSummaryRows(rows) {
-    return safeArray(rows).map((row) => `[${row.title || "요약"}]\n${row.content || ""}`).join("\n\n");
+    return safeArray(rows).map(summaryRowText).join("\n\n");
   }
 
   async function applyHealthCandidates() {
@@ -5356,6 +7273,7 @@ When current and historical facts differ, current facts take precedence.`;
     const data = await freshOwnedData();
     const evidence = healthEvidenceRows();
     const sourceIds = evidence.map((row) => String(row.id || "")).filter(Boolean);
+    const healthFps = sourceFingerprintsForRows(evidence, "summaries");
     const sourceQuote = sourceToTextForSummaryRows(evidence).slice(0, 12000);
     const stamp = nowIso();
     const conflicts = [];
@@ -5365,11 +7283,12 @@ When current and historical facts differ, current facts take precedence.`;
       if (index < 0) { conflicts.push(item); continue; }
       const existing = data.items[index];
       if (item.baseUpdatedAt && existing.updatedAt !== item.baseUpdatedAt) { conflicts.push(item); continue; }
+      if (isRestrictedItem(existing)) { conflicts.push(item); continue; }
       if (item.action === "update") {
         const mergedSources = Array.from(new Set([...safeArray(existing.sourceIds).map(String), ...sourceIds]));
         data.items[index] = item.type === "promise"
-          ? normalizePromise({ ...existing, title: item.title, content: item.content, titleKo: item.titleKo || existing.titleKo, contentKo: item.contentKo || existing.contentKo, priority: item.priority, scheduleText: item.scheduleText, sourceType: "health-check", sourceIds: mergedSources, sourceQuote: sourceQuote || existing.sourceQuote, updatedAt: stamp })
-          : normalizeAnchor({ ...existing, title: item.title, content: item.content, titleKo: item.titleKo || existing.titleKo, contentKo: item.contentKo || existing.contentKo, category: item.category, priority: item.priority, activation: item.activation, keywords: item.keywords, lifespan: item.lifespan, sourceType: "health-check", sourceIds: mergedSources, sourceQuote: sourceQuote || existing.sourceQuote, updatedAt: stamp });
+          ? normalizePromise({ ...existing, sourceFingerprints: { ...normalizeSourceFingerprints(existing.sourceFingerprints), ...healthFps }, title: item.title, content: item.content, titleKo: item.titleKo || existing.titleKo, contentKo: item.contentKo || existing.contentKo, priority: item.priority, scheduleText: item.scheduleText, sourceType: "health-check", sourceIds: mergedSources, sourceQuote: sourceQuote || existing.sourceQuote, updatedAt: stamp })
+          : normalizeAnchor({ ...existing, sourceFingerprints: { ...normalizeSourceFingerprints(existing.sourceFingerprints), ...healthFps }, title: item.title, content: item.content, titleKo: item.titleKo || existing.titleKo, contentKo: item.contentKo || existing.contentKo, category: item.category, priority: item.priority, activation: item.activation, keywords: item.keywords, lifespan: item.lifespan, sourceType: "health-check", sourceIds: mergedSources, sourceQuote: sourceQuote || existing.sourceQuote, updatedAt: stamp });
       } else if (item.action === "complete" && existing.type === "promise") {
         existing.status = "done"; existing.sourceType = "health-check"; existing.sourceIds = Array.from(new Set([...safeArray(existing.sourceIds).map(String), ...sourceIds])); existing.sourceQuote = sourceQuote || existing.sourceQuote; existing.updatedAt = stamp;
       } else if (item.action === "archive" && existing.type === "anchor") {
@@ -5407,9 +7326,9 @@ When current and historical facts differ, current facts take precedence.`;
           connectionId, runId: uid("memory-review"), streaming: false,
           messages: [
             { role: "system", content: reviewSystemPrompt() },
-            { role: "user", content: `[CURRENT MEMORY — MAY BE UPDATED]\n${JSON.stringify(snapshot, null, 2)}\n[/CURRENT MEMORY]\n\n[NEW SUMMARY — SOURCE OF NEW FACTS]\n${sourceText}\n[/NEW SUMMARY]` },
+            { role: "user", content: `[CURRENT MEMORY — MAY BE UPDATED]\n${JSON.stringify(snapshot, null, 2)}\n[/CURRENT MEMORY]${threadSnapshotForPrompt()}${recentEpisodesForPrompt()}\n\n[NEW SUMMARY — SOURCE OF NEW FACTS]\n${sourceText}\n[/NEW SUMMARY]` },
           ],
-          parameters: { maxTokens: 3000, reasoningEffort: null },
+          parameters: { maxTokens: 4500, reasoningEffort: null },
         },
       });
       const output = extractGeneratedText(payload);
@@ -5417,7 +7336,12 @@ When current and historical facts differ, current facts take precedence.`;
       if (!parsedResult.ok) { openRawRecovery("review", output, rows); return false; }
       const rawRows = parsedResult.rows;
       state.reviewCandidates = rawRows.map(normalizeReviewCandidate).filter(Boolean).slice(0, 20);
-      state.reviewSelected = new Set(state.reviewCandidates.map((item, i) => item.action === "keep" ? null : String(i)).filter(Boolean));
+      state.reviewEpisodes = extractEpisodeCandidates(rawRows, rows, "summaries");
+      state.reviewEpisodeSelected = preselectEpisodes(state.reviewEpisodes);
+      state.reviewThreads = extractThreadCandidates(rawRows, rows, "summaries");
+      state.reviewThreadSelected = preselectThreads(state.reviewThreads);
+      markScopeReview(state.reviewCandidates, rows);
+      state.reviewSelected = new Set(state.reviewCandidates.map((item, i) => item.action === "keep" || scopeBlocksApply(item) || item.duplicateOf ? null : String(i)).filter(Boolean));
       state.reviewSourceRows = rows.slice();
       await persistPendingReview();
       if (showLayer) state.layer = "review-candidates";
@@ -5444,19 +7368,24 @@ When current and historical facts differ, current facts take precedence.`;
 
   async function applyReviewCandidates({ auto = false } = {}) {
     const chosen = state.reviewCandidates.map((item, index) => ({ item, index })).filter(({ item, index }) => state.reviewSelected.has(String(index)) && item.action !== "keep");
-    if (!chosen.length) throw new Error("적용할 변경을 선택해 주세요.");
+    if (!chosen.length && !state.reviewEpisodeSelected.size && !state.reviewThreadSelected.size) throw new Error("적용할 변경을 선택해 주세요.");
     const data = await freshOwnedData();
     const sourceIds = state.reviewSourceRows.map((row) => String(row.id || "")).filter(Boolean);
-    const sourceQuote = state.reviewSourceRows.map((row) => `[${row.title || "요약"}]\n${row.content || ""}`).join("\n\n").slice(0, 12000);
+    const sourceQuote = state.reviewSourceRows.map(summaryRowText).join("\n\n").slice(0, 12000);
+    const sourceFingerprints = sourceFingerprintsForRows(state.reviewSourceRows, "summaries");
     const now = nowIso();
     const conflicts = [];
     const applied = [];
     const undo = { createdAt: now, sourceBatchKey: summaryBatchKey(state.reviewSourceRows), updated: [], created: [] };
     for (const { item, index: candidateIndex } of chosen) {
+      if (["add", "update"].includes(item.action) && scopeBlocksApply(item)) { conflicts.push({ item, reason: "공개 범위 확인 필요" }); continue; }
       if (item.action === "add") {
+        // 같은 후보를 두 번 적용해도 하나만 남긴다(재시도·연타 대비).
+        if (item.candidateId && data.items.some((row) => row.sourceCandidateId === item.candidateId)) { applied.push(candidateIndex); continue; }
+        const scope = { knownBy: normalizeKnownBy(item.knownByIds), sourceFingerprints, sourceCandidateId: item.candidateId };
         const created = item.type === "promise"
-          ? normalizePromise({ ...item, id: uid("promise"), sourceType: "summary-model-review", sourceIds, sourceQuote, createdAt: now, updatedAt: now })
-          : normalizeAnchor({ ...item, id: uid("anchor"), sourceType: "summary-model-review", sourceIds, sourceQuote, createdAt: now, updatedAt: now });
+          ? normalizePromise({ ...item, ...scope, id: uid("promise"), sourceType: "summary-model-review", sourceIds, sourceQuote, createdAt: now, updatedAt: now })
+          : normalizeAnchor({ ...item, ...scope, id: uid("anchor"), sourceType: "summary-model-review", sourceIds, sourceQuote, createdAt: now, updatedAt: now });
         data.items.unshift(created);
         undo.created.push({ id: created.id, appliedUpdatedAt: created.updatedAt });
         applied.push(candidateIndex);
@@ -5469,9 +7398,11 @@ When current and historical facts differ, current facts take precedence.`;
       const before = JSON.parse(JSON.stringify(existing));
       if (item.action === "update") {
         const mergedSources = Array.from(new Set([...safeArray(existing.sourceIds).map(String), ...sourceIds]));
+        const knownBy = normalizeKnownBy(item.knownByIds).length ? normalizeKnownBy(item.knownByIds) : item.scopeConfirmed ? [] : normalizeKnownBy(existing.knownBy);
+        const scope = { knownBy, sourceFingerprints: { ...normalizeSourceFingerprints(existing.sourceFingerprints), ...sourceFingerprints } };
         data.items[index] = item.type === "promise"
-          ? normalizePromise({ ...existing, title: item.title, content: item.content, titleKo: item.titleKo || existing.titleKo, contentKo: item.contentKo || existing.contentKo, priority: item.priority, scheduleText: item.scheduleText, sourceType: "summary-model-review", sourceIds: mergedSources, sourceQuote, updatedAt: now })
-          : normalizeAnchor({ ...existing, title: item.title, content: item.content, titleKo: item.titleKo || existing.titleKo, contentKo: item.contentKo || existing.contentKo, category: item.category, priority: item.priority, activation: item.activation, keywords: item.keywords, lifespan: item.lifespan, sourceType: "summary-model-review", sourceIds: mergedSources, sourceQuote, updatedAt: now });
+          ? normalizePromise({ ...existing, ...scope, title: item.title, content: item.content, titleKo: item.titleKo || existing.titleKo, contentKo: item.contentKo || existing.contentKo, priority: item.priority, scheduleText: item.scheduleText, sourceType: "summary-model-review", sourceIds: mergedSources, sourceQuote, updatedAt: now })
+          : normalizeAnchor({ ...existing, ...scope, title: item.title, content: item.content, titleKo: item.titleKo || existing.titleKo, contentKo: item.contentKo || existing.contentKo, category: item.category, priority: item.priority, activation: item.activation, keywords: item.keywords, lifespan: item.lifespan, sourceType: "summary-model-review", sourceIds: mergedSources, sourceQuote, updatedAt: now });
       } else if (item.action === "complete" && existing.type === "promise") {
         existing.status = "done"; existing.sourceType = "summary-model-review"; existing.sourceIds = Array.from(new Set([...safeArray(existing.sourceIds).map(String), ...sourceIds])); existing.sourceQuote = sourceQuote || existing.sourceQuote; existing.updatedAt = now;
       }
@@ -5482,30 +7413,50 @@ When current and historical facts differ, current facts take precedence.`;
       undo.updated.push({ id: existing.id, before, appliedUpdatedAt: data.items[index].updatedAt });
       applied.push(candidateIndex);
     }
-    if (!applied.length && conflicts.length) {
+    const ep = applyEpisodeCandidates(data, state.reviewEpisodes, state.reviewEpisodeSelected, { fps: sourceFingerprints, sourceIds, rows: state.reviewSourceRows });
+    const th = applyThreadCandidates(data, state.reviewThreads, state.reviewThreadSelected, { fps: sourceFingerprints, sourceIds, rows: state.reviewSourceRows });
+    const thHeld = new Set(th.held.map(String));
+    const thApplied = state.reviewThreads.filter((cand, i) => state.reviewThreadSelected.has(String(i)) && !thHeld.has(String(i))).map((cand) => cand.candidateId);
+    if (thApplied.length) {
+      undo.threadCandidates = thApplied;
+      undo.threadVersions = Object.fromEntries(threadList(data).filter(t => t.history.some(e => thApplied.includes(e.candidateId))).map(t => [t.id, JSON.stringify(t)]));
+    }
+    ep.held.push(...th.held.map((i) => `th${i}`));
+    ep.applied += th.applied;
+    const epHeld = new Set(ep.held.map(String));
+    if (ep.createdIds.length) undo.episodes = ep.createdIds;
+    const scopeHeld = conflicts.filter((row) => row.reason === "공개 범위 확인 필요").length + ep.held.length;
+    const appliedCount = applied.length + ep.applied;
+    if (!appliedCount && (conflicts.length || ep.held.length)) {
       state.currentData = data;
       state.reviewSelected.clear();
+      state.reviewEpisodeSelected = new Set();
+      state.reviewThreadSelected = new Set();
       await persistPendingReview();
-      toast(`충돌 ${conflicts.length}개 · 후보 생성 뒤 수정된 원본은 덮어쓰지 않았습니다.`, true);
+      toast(scopeHeld ? `공개 범위를 확인해야 하는 후보 ${scopeHeld}개는 적용하지 않았습니다. 아는 인물을 고르거나 '모두에게 공개'를 눌러 주세요.` : `충돌 ${conflicts.length}개 · 후보 생성 뒤 수정된 원본은 덮어쓰지 않았습니다.`, true);
       render();
       return;
     }
-    data.lastAutoReviewUndo = auto && applied.length ? undo : data.lastAutoReviewUndo;
-    if (!conflicts.length) data.pendingReview = null;
+    data.lastAutoReviewUndo = auto && appliedCount ? undo : data.lastAutoReviewUndo;
+    if (!conflicts.length && !ep.held.length) data.pendingReview = null;
     await persistData(data);
-    if (conflicts.length) {
+    if (conflicts.length || ep.held.length) {
       const conflictKeys = new Set(conflicts.map(({ item }) => item));
       state.reviewCandidates = state.reviewCandidates.filter((item) => conflictKeys.has(item));
+      state.reviewEpisodes = state.reviewEpisodes.filter((_, i) => epHeld.has(String(i)));
+      state.reviewEpisodeSelected = new Set();
+      state.reviewThreads = state.reviewThreads.filter((_, i) => thHeld.has(String(i)));
+      state.reviewThreadSelected = new Set();
       state.reviewSelected = new Set();
       state.layer = "review-candidates";
       await persistPendingReview();
-      toast(`${applied.length}개 반영 · 충돌 ${conflicts.length}개는 원본을 보호하고 남겨뒀습니다.`, true);
+      toast(`${appliedCount}개 반영 · ${scopeHeld ? `공개 범위 확인 ${scopeHeld}개 · ` : ""}충돌 ${conflicts.length + ep.held.length - scopeHeld}개는 남겨뒀습니다.${ep.capped ? ` 장면 기억 상한(${EPISODE_LIMIT}개)에 걸린 ${ep.capped}개도 남겼어요.` : ""}`, true);
       render();
       return;
     }
     await markSummaryRowsReviewed(state.reviewSourceRows);
-    state.reviewCandidates = []; state.reviewSelected.clear(); state.reviewSourceRows = []; state.layer = null;
-    toast(auto ? `자동 정리로 ${applied.length}개 변경을 반영했습니다. 1회 되돌리기가 가능합니다.` : `${applied.length}개 변경을 반영했습니다.`);
+    state.reviewCandidates = []; state.reviewSelected.clear(); state.reviewSourceRows = []; state.reviewEpisodes = []; state.reviewEpisodeSelected = new Set(); state.reviewThreads = []; state.reviewThreadSelected = new Set(); state.layer = null;
+    toast(`${auto ? `자동 정리로 ${appliedCount}개 변경을 반영했습니다. 1회 되돌리기가 가능합니다.` : `${appliedCount}개 변경을 반영했습니다.`}${syncFailSuffix()}`, !!syncFailSuffix());
     render();
   }
 
@@ -5530,6 +7481,26 @@ When current and historical facts differ, current facts take precedence.`;
       removed += 1;
       return false;
     });
+    const undoEpisodes = new Set(safeArray(undo.episodes).map(String));
+    if (undoEpisodes.size && Array.isArray(data.episodes)) {
+      const list = data.episodes.map(normalizeEpisode).filter(Boolean);
+      const removable = new Set(list.filter((ep) => undoEpisodes.has(ep.id) && ep.updatedAt === ep.createdAt).map((ep) => ep.id));
+      skipped += undoEpisodes.size - removable.size;
+      removed += removable.size;
+      data.episodes = list.filter((ep) => !removable.has(ep.id)).map((ep) => (ep.replacedBy && removable.has(ep.replacedBy) ? { ...ep, replacedBy: undefined } : ep)).map(normalizeEpisode).filter(Boolean);
+    }
+    const undoThreads = new Set(safeArray(undo.threadCandidates).map(String));
+    if (undoThreads.size && Array.isArray(data.threads)) {
+      data.threads = data.threads.map(normalizeThread).filter(Boolean).flatMap((t) => {
+        if (undo.threadVersions?.[t.id] !== JSON.stringify(t)) { skipped += 1; return [t]; }
+        if (undoThreads.has(t.sourceCandidateId) && t.history.every((entry) => entry.candidateId && undoThreads.has(entry.candidateId))) { removed += 1; return []; }
+        const history = t.history.filter((entry) => !(entry.candidateId && undoThreads.has(entry.candidateId)));
+        if (history.length === t.history.length) return [t];
+        restored += 1;
+        const next = normalizeThread({ ...t, history });
+        return [normalizeThread({ ...next, ...threadOverall(next) })];
+      });
+    }
     data.lastAutoReviewUndo = null;
     await persistData(data);
     toast(`자동 적용 되돌리기 완료 · 복원 ${restored}개 · 신규 제거 ${removed}개${skipped ? ` · 직접 수정 보호 ${skipped}개` : ""}`);
@@ -5555,20 +7526,30 @@ When current and historical facts differ, current facts take precedence.`;
           streaming: false,
           messages: [
             { role: "system", content: modelSystemPrompt() },
-            { role: "user", content: `[SOURCE — READ ONLY]\n${text}\n[/SOURCE]` },
+            { role: "user", content: `[SOURCE — READ ONLY]\n${text}\n[/SOURCE]\n\n[CURRENT MEMORY]\n${JSON.stringify(reviewMemorySnapshot().filter((row) => row.type === "promise"), null, 2)}\n[/CURRENT MEMORY]${threadSnapshotForPrompt()}${recentEpisodesForPrompt()}` },
           ],
-          parameters: { maxTokens: 1800, reasoningEffort: null },
+          parameters: { maxTokens: 3200, reasoningEffort: null },
         },
       });
       const output = extractGeneratedText(payload);
       const parsedResult = parseCandidateJson(output);
       if (!parsedResult.ok) { openRawRecovery("candidate", output, rows); return; }
       const parsed = parsedResult.rows.map(normalizeCandidate).filter(Boolean).slice(0, 12);
-      if (!parsed.length && parsedResult.rows.length) { openRawRecovery("candidate", output, rows); return; }
+      const episodeCands = extractEpisodeCandidates(parsedResult.rows, rows, state.sourceMode);
+      const threadCands = extractThreadCandidates(parsedResult.rows, rows, state.sourceMode);
+      if (!parsed.length && !episodeCands.length && !threadCands.length && parsedResult.rows.length) { openRawRecovery("candidate", output, rows); return; }
+      state.candThreads = threadCands;
+      state.candThreadSelected = preselectThreads(threadCands);
+      state.candEpisodes = episodeCands;
+      state.candEpisodeSelected = preselectEpisodes(episodeCands);
+      state.candBatch = { fps: sourceFingerprintsForRows(rows, state.sourceMode), sourceIds: rows.map((row) => String(row.id || "")).filter(Boolean), rows: rows.map((row) => ({ createdAt: row.createdAt, updatedAt: row.updatedAt, endIndex: row.endIndex })) };
       const quote = sourceToText(rows).slice(0, 12000);
       const ids = rows.map((row) => String(row.id || "")).filter(Boolean);
-      state.candidates = parsed.map((item) => ({ ...item, id: "", sourceType: "model", sourceIds: ids, sourceQuote: quote }));
-      state.candidateSelected = new Set(parsed.map((_, i) => String(i)));
+      const fps = sourceFingerprintsForRows(rows, state.sourceMode);
+      state.candidates = parsed.map((item) => ({ ...item, id: "", candidateId: uid("cand"), sourceType: "model", sourceIds: ids, sourceQuote: quote, ...(Object.keys(fps).length ? { sourceFingerprints: fps } : {}) }));
+      if (state.sourceMode === "summaries") markScopeReview(state.candidates, rows);
+      for (const cand of state.candidates) { const dup = safeArray(state.currentData?.items).find((row) => row.type === cand.type && titleKey(row.title) && titleKey(row.title) === titleKey(cand.title)); if (dup) cand.duplicateOf = dup.id; }
+      state.candidateSelected = new Set(state.candidates.map((item, i) => scopeBlocksApply(item) || item.duplicateOf ? null : String(i)).filter(Boolean));
       state.layer = "candidates";
     } finally {
       state.busy = false;
@@ -5589,9 +7570,9 @@ When current and historical facts differ, current facts take precedence.`;
       if (!file) return;
       try {
         if (file.size > MAX_IMPORT_BYTES) throw new Error("10 MiB 이하의 JSON을 선택해 주세요.");
-        const raw = parseImport(await file.text());
+        const raw = prepareScopeImport(parseImport(await file.text()));
         if (host.getCurrentChatId() !== chatId || state.selectedChatId !== chatId) throw new Error("채팅이 바뀌었습니다. 현재 채팅에서 다시 가져와 주세요.");
-        const count = safeArray(raw.items).length + safeArray(raw.elementMemory?.entities).length + safeArray(raw.wiki?.docs).length;
+        const count = safeArray(raw.items).length + safeArray(raw.elementMemory?.entities).length + safeArray(raw.wiki?.docs).length + safeArray(raw.episodes).length + safeArray(raw.threads).length;
         if (!window.confirm(`이 JSON의 기억 ${count}개로 현재 채팅의 보관함을 교체할까요?\n기존 기억은 JSON으로 내려받고 채팅 안에도 직전 가져오기 백업을 남깁니다. 원본 메시지는 바꾸지 않습니다.`)) return;
         setBusy(true, "기억 데이터를 가져오는 중…");
         const previous = parseRecord(state.currentChat?.metadata)[DATA_KEY];
@@ -5654,6 +7635,8 @@ When current and historical facts differ, current facts take precedence.`;
     toast(`${added}개 기록을 복사해 가져왔습니다. 기존 약속보관함 원본은 유지됩니다.`);
   }
 
+  // 저장·적용 계열은 한 번에 하나만 실행한다. 동기화가 느릴 때 연타로 같은 기록이 두 번 생기지 않게 한다.
+  const LOCKED_ACTIONS = new Set(["save-thread", "delete-thread", "thread-status", "save-episode", "delete-episode", "stale-ack", "branch-hold-keep", "branch-hold-drop", "save-candidates", "apply-review", "apply-health", "save-element-candidates", "save-draft", "save-element", "delete-item", "delete-element", "promise-status", "toggle-promise-done", "toggle-anchor-active", "anchor-move", "save-settings", "save-element-settings", "import-legacy", "undo-auto-review", "restore-memory-backup", "confirm-quarantined-memory", "wiki-save", "wiki-candidate-save", "wiki-proposal-apply", "wiki-delete", "wiki-save-settings", "wiki-toggle", "parse-raw-recovery"]);
   async function handleClick(event) {
     const actionEl = event.target.closest?.("[data-action]");
     if (!actionEl) return;
@@ -5663,6 +7646,7 @@ When current and historical facts differ, current facts take precedence.`;
     try {
       if (action === "export-memory") { downloadJson(exportData(state.currentData), "memory-vault.json"); return; }
       if (action === "import-memory") { chooseMemoryImport(); return; }
+      if (action === "confirm-import-scope") { await confirmImportScope(Number(actionEl.dataset.index)); return; }
       if (String(action || "").startsWith("wiki-") || String(action || "").startsWith("reset-wiki-")) { if (await handleWikiAction(action, actionEl)) return; }
       if (action === "overlay-close" && event.target !== actionEl) return;
       if (action === "overlay-close" || action === "close") return closeModal();
@@ -5768,6 +7752,7 @@ When current and historical facts differ, current facts take precedence.`;
           memory.entities[idx] = normalizeElement({ ...old, name, aliases, standaloneTriggers, triggerGroups, currentFacts: mergeFactLines(old.currentFacts, currentTexts, now), historyFacts: mergeFactLines(old.historyFacts, historyTexts, now), updatedAt: now });
         } else {
           if (elementFindMatches(memory.entities, name).length) throw new Error("같은 이름이나 별칭을 가진 요소가 이미 있습니다.");
+          if (memory.entities.length >= 400) throw new Error("요소 기억은 최대 400개까지 보관할 수 있어요. 오래된 요소를 정리한 뒤 추가해 주세요.");
           memory.entities.push(normalizeElement({ id: uid("element"), name, aliases, standaloneTriggers, triggerGroups, currentFacts: currentTexts.map((text) => ({ id: uid("elf"), text, source: null, createdAt: now })), historyFacts: historyTexts.map((text) => ({ id: uid("elf"), text, source: null, createdAt: now })), createdAt: now, updatedAt: now }));
         }
         memory.originChatId = state.selectedChatId; data.elementMemory = memory; await persistData(data); state.layer = null; state.elementDraft = null; render(); return;
@@ -5776,6 +7761,22 @@ When current and historical facts differ, current facts take precedence.`;
         if (state.elementExtractMode === "range") { state.elementRangeStart = Math.max(1, Number(document.getElementById("mmc-element-range-start")?.value) || state.elementRangeStart); state.elementRangeEnd = Math.max(state.elementRangeStart, Number(document.getElementById("mmc-element-range-end")?.value) || state.elementRangeEnd); }
         else state.elementExtractTurns = Math.max(1, Math.min(100, Number(document.getElementById("mmc-element-turns")?.value) || state.elementExtractTurns));
         await saveUiState(); await generateElementCandidates(); return;
+      }
+      if (action === "bulk-select" || action === "bulk-clear") {
+        const kind = String(actionEl.dataset.bulk || "");
+        if (!["review", "candidate", "health"].includes(kind)) return;
+        if (action === "bulk-select") {
+          const { selected, skipped } = selectAllSafe(kind);
+          if (kind === "review") await persistPendingReview();
+          render();
+          toast(skipped ? `${selected}개를 골랐어요. ${skipped}개는 충돌·공개 범위·중복 확인이 필요해 직접 골라 주세요.` : `${selected}개를 모두 골랐어요.`);
+        } else {
+          clearSelection(kind);
+          if (kind === "review") await persistPendingReview();
+          render();
+          toast(kind === "review" ? "모두 보류했어요. 후보는 지우지 않고 승인 대기에 그대로 남겨 두었어요." : "선택을 모두 풀었어요.");
+        }
+        return;
       }
       if (action === "element-select-all") { state.elementCandidateSelected = new Set(state.elementCandidates.map((_, i) => String(i))); render(); return; }
       if (action === "element-select-none") { state.elementCandidateSelected.clear(); render(); return; }
@@ -5849,21 +7850,110 @@ When current and historical facts differ, current facts take precedence.`;
       if (action === "source-mark-reviewed") { const rows = selectedSourceRows(); await markSummaryRowsReviewed(rows); state.layer = null; toast("선택한 요약을 검토 완료로 표시했습니다."); render(); return; }
       if (action === "review-mark-done") { const rows = state.reviewSourceRows.slice(); await clearPendingReview(); await markSummaryRowsReviewed(rows); state.layer = null; toast("이번 요약을 검토 완료로 표시했습니다."); render(); return; }
       if (action === "discard-review") { if (!window.confirm("승인 대기 후보를 폐기할까요? 원본 요약과 기존 기억은 그대로 유지됩니다.")) return; await clearPendingReview(); state.layer = null; toast("승인 대기 후보를 폐기했습니다. 원본 요약은 그대로입니다."); render(); return; }
+      if (action === "branch-hold-open") { state.layer = "branch-hold"; render(); return; }
+      if (action === "new-thread") { state.threadDraft = { title: "" }; state.layer = "thread-editor"; render(); return; }
+      if (action === "edit-thread") { const t = threadList().find((row) => row.id === actionEl.dataset.id); if (!t) return; state.threadDraft = JSON.parse(JSON.stringify(t)); state.layer = "thread-editor"; render(); return; }
+      if (action === "save-thread") { await saveThreadDraft(); return; }
+      if (action === "thread-status") { await setThreadStatus(String(actionEl.dataset.id || ""), String(actionEl.dataset.status || "")); return; }
+      if (action === "delete-thread") {
+        const id = String(actionEl.dataset.id || "");
+        if (!id || !window.confirm("이 진행 흐름을 지울까요? 상태 기록도 함께 지워지고 주입에서 빠집니다.")) return;
+        const data = await freshOwnedData();
+        data.threads = safeArray(data.threads).map(normalizeThread).filter(Boolean).filter((t) => t.id !== id);
+        await persistData(data); state.threadDraft = null; state.layer = null; render(); return;
+      }
+      if (action === "thread-to-update") {
+        const kind = String(actionEl.dataset.threadKind || "");
+        const cand = (kind === "rev" ? state.reviewThreads : state.candThreads)[Number(actionEl.dataset.index)];
+        if (!cand?.similarTo) return;
+        Object.assign(cand, { action: "update", targetId: cand.similarTo, similarTo: "" });
+        (kind === "rev" ? state.reviewThreadSelected : state.candThreadSelected).add(String(actionEl.dataset.index));
+        if (kind === "rev") await persistPendingReview();
+        render(); return;
+      }
+      if (action === "new-episode") { state.episodeDraft = { title: "" }; state.episodeDraftExtraFacts = 1; state.layer = "episode-editor"; render(); return; }
+      if (action === "edit-episode") { const ep = episodeList().find((row) => row.id === actionEl.dataset.id); if (!ep) return; state.episodeDraft = JSON.parse(JSON.stringify(ep)); state.episodeDraftExtraFacts = 0; state.layer = "episode-editor"; render(); return; }
+      if (action === "episode-add-fact") { captureEpisodeDraft(); state.episodeDraftExtraFacts = (state.episodeDraftExtraFacts || 0) + 1; render(); return; }
+      if (action === "save-episode") { await saveEpisodeDraft(); return; }
+      if (action === "delete-episode") {
+        const id = String(actionEl.dataset.id || "");
+        if (!id || !window.confirm("이 장면 기억을 지울까요? 전용 로어북에서도 빠집니다.")) return;
+        const data = await freshOwnedData();
+        data.episodes = safeArray(data.episodes).map(normalizeEpisode).filter(Boolean).filter((ep) => ep.id !== id).map((ep) => (ep.replacedBy === id ? normalizeEpisode({ ...ep, replacedBy: "" }) : ep));
+        await persistData(data); state.episodeDraft = null; state.layer = null; render(); return;
+      }
+      if (action === "episode-scope-public") {
+        const kind = String(actionEl.dataset.episodeKind || "");
+        const cand = (kind === "rev" ? state.reviewEpisodes : state.candEpisodes)[Number(actionEl.dataset.index)];
+        if (!cand) return;
+        if (!window.confirm("아는 인물을 정하지 않은 사건·사실을 모두가 아는 것으로 저장할까요? 일부 인물만 아는 내용이 섞인 원문에서 나온 후보입니다.")) return;
+        for (const part of [cand.event, ...cand.facts]) if (!normalizeKnownBy(part.knownByIds).length) part.scopeConfirmed = true;
+        (kind === "rev" ? state.reviewEpisodeSelected : state.candEpisodeSelected).add(String(actionEl.dataset.index));
+        if (kind === "rev") await persistPendingReview();
+        render(); return;
+      }
+      if (action === "stale-open") { state.layer = "stale"; render(); return; }
+      if (action === "stale-refresh") { await refreshStaleRecords(); render(); return; }
+      if (action === "stale-ack") { await acknowledgeStale(actionEl.dataset.index); return; }
+      if (action === "branch-hold-keep" || action === "branch-hold-drop") {
+        const keep = action === "branch-hold-keep";
+        if (!keep && !window.confirm(actionEl.dataset.kind === "all" ? "확인 대기 기록을 모두 이 분기에서 뺄까요? 부모 RP의 기록은 그대로예요." : "이 기록을 이 분기에서 뺄까요? 부모 RP의 기록은 그대로예요.")) return;
+        await resolveBranchHold(String(actionEl.dataset.kind || ""), String(actionEl.dataset.index || ""), keep);
+        return;
+      }
+      if (action === "review-to-update") {
+        const item = state.reviewCandidates[Number(actionEl.dataset.index)];
+        const dup = item && safeArray(state.currentData?.items).find((row) => row.id === item.duplicateOf);
+        if (!item || !dup) return;
+        Object.assign(item, { action: "update", targetId: dup.id, baseUpdatedAt: dup.updatedAt, duplicateOf: "" });
+        if (!normalizeKnownBy(item.knownByIds).length && isRestrictedItem(dup)) item.knownByIds = normalizeKnownBy(dup.knownBy);
+        state.reviewSelected.add(actionEl.dataset.index);
+        await persistPendingReview(); render(); return;
+      }
+      if (action === "scope-public") {
+        const target = scopeTarget(String(actionEl.dataset.scopeKind || ""), actionEl.dataset.scopeIndex);
+        if (!target) return;
+        if (!window.confirm("이 후보를 모든 인물이 아는 기억으로 저장할까요? 일부 인물만 아는 원문에서 나온 후보입니다.")) return;
+        target.knownByIds = []; target.scopeConfirmed = true;
+        if (actionEl.dataset.scopeKind === "review" || String(actionEl.dataset.scopeKind || "").startsWith("rev-")) await persistPendingReview();
+        render(); return;
+      }
       if (action === "apply-review") { await applyReviewCandidates(); return; }
       if (action === "apply-health") { await applyHealthCandidates(); return; }
       if (action === "save-candidates") {
-        const selected = state.candidates.filter((_, i) => state.candidateSelected.has(String(i)));
-        if (!selected.length) return;
+        const picked = state.candidates.filter((_, i) => state.candidateSelected.has(String(i)));
+        const held = picked.filter(scopeBlocksApply);
+        const selected = picked.filter((raw) => !scopeBlocksApply(raw));
+        const epPicked = [...state.candEpisodeSelected].filter((i) => !episodeScopeBlocks(state.candEpisodes[Number(i)]));
+        const thPicked = [...state.candThreadSelected].filter((i) => !threadCandidateBlocks(state.candThreads[Number(i)]));
+        const epHeldCount = state.candEpisodeSelected.size - epPicked.length + state.candThreadSelected.size - thPicked.length;
+        if (!selected.length && !epPicked.length && !thPicked.length) { if (held.length || epHeldCount) toast(`공개 범위를 확인해야 하는 후보 ${held.length + epHeldCount}개는 저장하지 않았습니다.`, true); return; }
         const data = normalizeData(state.currentData);
         const now = nowIso();
         for (const raw of selected.slice().reverse()) {
-          const item = normalizeItem({ ...raw, id: uid(raw.type), createdAt: now, updatedAt: now });
+          if (raw.candidateId && data.items.some((row) => row.sourceCandidateId === raw.candidateId)) continue;
+          const item = normalizeItem({ ...raw, knownBy: normalizeKnownBy(raw.knownByIds), sourceCandidateId: raw.candidateId, id: uid(raw.type), createdAt: now, updatedAt: now });
           data.items.unshift(item);
         }
+        const batch = state.candBatch || {};
+        const ep = applyEpisodeCandidates(data, state.candEpisodes, state.candEpisodeSelected, { fps: parseRecord(batch.fps), sourceIds: safeArray(batch.sourceIds), rows: safeArray(batch.rows) });
+        const th = applyThreadCandidates(data, state.candThreads, state.candThreadSelected, { fps: parseRecord(batch.fps), sourceIds: safeArray(batch.sourceIds), rows: safeArray(batch.rows) });
         await persistData(data);
-        state.layer = null; state.candidates = []; state.candidateSelected.clear(); render(); return;
+        if (held.length || ep.held.length || th.held.length) {
+          const thKeep = new Set(th.held.map(String));
+          state.candThreads = state.candThreads.filter((_, i) => thKeep.has(String(i)));
+          state.candThreadSelected = new Set();
+          const keep = new Set(held);
+          const epKeep = new Set(ep.held.map(String));
+          state.candidates = state.candidates.filter((raw) => keep.has(raw));
+          state.candEpisodes = state.candEpisodes.filter((_, i) => epKeep.has(String(i)));
+          state.candidateSelected.clear(); state.candEpisodeSelected = new Set();
+          toast(`${selected.length + ep.applied + th.applied}개 저장 · 공개 범위 확인이 필요하거나 상한에 걸린 ${held.length + ep.held.length + th.held.length}개는 남겨뒀습니다.`, true);
+          render(); return;
+        }
+        state.layer = null; state.candidates = []; state.candidateSelected.clear(); state.candEpisodes = []; state.candEpisodeSelected = new Set(); state.candThreads = []; state.candThreadSelected = new Set(); state.candBatch = null; render(); return;
       }
-      if (action === "sync") { await syncLorebook({ silent: false }); return; }
+      if (action === "sync") { await syncLorebook({ silent: false }); try { await refreshAgentNotice(); render(); } catch {} return; }
       if (action === "import-legacy") { await importLegacy(); render(); return; }
       if (action === "reset-review-prompt") { const box = document.getElementById("mmc-review-prompt"); if (box) box.value = DEFAULT_REVIEW_PROMPT; return; }
       if (action === "save-settings") {
@@ -5871,6 +7961,10 @@ When current and historical facts differ, current facts take precedence.`;
         data.maxPromises = Math.max(1, Math.min(20, Number(document.getElementById("mmc-max-promises")?.value) || data.maxPromises));
         data.maxAnchors = Math.max(1, Math.min(24, Number(document.getElementById("mmc-max-anchors")?.value) || data.maxAnchors));
         data.anchorBudgetChars = Math.max(600, Math.min(12000, Number(document.getElementById("mmc-anchor-budget")?.value) || data.anchorBudgetChars));
+        const totalBudget = Math.max(0, Math.min(20000, Number(document.getElementById("mmc-total-budget")?.value) || 0));
+        const episodeBox = document.getElementById("mmc-episode-injection");
+        if (episodeBox && (episodeBox.checked !== episodeInjectionOn(data))) data.episodeInjection = episodeBox.checked;
+        if (totalBudget || data.alwaysBudgetTokens) data.alwaysBudgetTokens = totalBudget;
         state.modelConnectionId = String(document.getElementById("mmc-settings-model")?.value || state.modelConnectionId || "");
         state.uiFontSize = ["normal", "large", "xlarge"].includes(document.getElementById("mmc-ui-font-size")?.value) ? document.getElementById("mmc-ui-font-size").value : "normal";
         state.koDisplay = String(document.getElementById("mmc-ko-display")?.value || "") === "original" ? "original" : "auto";
@@ -5923,6 +8017,33 @@ When current and historical facts differ, current facts take precedence.`;
         state.busyTimer = null;
         render();
         return;
+      }
+      if (event.target?.matches?.("[data-scope-kind]")) {
+        const kind = String(event.target.dataset.scopeKind || "");
+        const charId = String(event.target.dataset.scopeChar || "");
+        if (kind === "draft" || kind.startsWith("epdraft") || kind === "thdraft") { event.target.closest(".mmc-scope-chip")?.classList.toggle("is-on", !!event.target.checked); refreshDraftScopeDom(event.target.closest(".mmc-scope")); return; }
+        const target = scopeTarget(kind, event.target.dataset.scopeIndex);
+        if (!target || !charId) return;
+        const ids = normalizeKnownBy(target.knownByIds).filter((id) => id !== charId);
+        if (event.target.checked) ids.push(charId);
+        target.knownByIds = ids;
+        target.scopeConfirmed = true;
+        if (kind === "review" || kind.startsWith("rev-")) await persistPendingReview();
+        render(); return;
+      }
+      if (event.target?.matches?.("[data-thread-index]")) {
+        const set = event.target.dataset.threadKind === "rev" ? state.reviewThreadSelected : state.candThreadSelected;
+        const id = String(event.target.dataset.threadIndex || "");
+        if (event.target.checked) set.add(id); else set.delete(id);
+        if (event.target.dataset.threadKind === "rev") await persistPendingReview();
+        render(); return;
+      }
+      if (event.target?.matches?.("[data-episode-index]")) {
+        const set = event.target.dataset.episodeKind === "rev" ? state.reviewEpisodeSelected : state.candEpisodeSelected;
+        const id = String(event.target.dataset.episodeIndex || "");
+        if (event.target.checked) set.add(id); else set.delete(id);
+        if (event.target.dataset.episodeKind === "rev") await persistPendingReview();
+        render(); return;
       }
       if (event.target?.matches?.("[data-source-id]")) {
         const id = String(event.target.dataset.sourceId || "");

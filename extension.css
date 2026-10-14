@@ -759,6 +759,79 @@
 #mmc-root-v1 .mmc-ownership-actions{flex-direction:column}}
 @media(max-width:380px){#mmc-root-v1 .mmc-theme-cards{grid-template-columns:minmax(0,1fr)}
 #mmc-root-v1 .mmc-stats{grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:8px}}
+/* v2.1 · 아는 인물 범위 */
+#mmc-root-v1 .mmc-meter i.is-restricted,#mmc-root-v1 .mmc-legend .is-restricted i{background:var(--mv-accent-2)}
+#mmc-root-v1 .mmc-preview-block.is-restricted>header{border-left:4px solid var(--mv-accent-2)}
+#mmc-root-v1 .mmc-advanced-memory-note.is-warn .mmc-alert-icon{background:color-mix(in srgb,var(--mv-warn) 15%,var(--mv-paper));color:var(--mv-warn)}
+#mmc-root-v1 .mmc-advanced-memory-note small+small{margin-top:4px}
+#mmc-root-v1 .mmc-scope{display:flex;flex-direction:column;gap:5px;margin-top:8px;padding-top:8px;border-top:1px dashed var(--mv-line)}
+#mmc-root-v1 .mmc-scope-label{display:flex;align-items:center;gap:5px;color:var(--mv-ink-2);font-size:var(--t-2xs);font-weight:600}
+#mmc-root-v1 .mmc-scope-label .mmc-svg{width:13px;height:13px}
+#mmc-root-v1 .mmc-scope.is-restricted .mmc-scope-label{color:var(--mv-accent-2)}
+#mmc-root-v1 .mmc-scope.is-pending .mmc-scope-label{color:var(--mv-warn)}
+#mmc-root-v1 .mmc-scope-chips{display:flex;flex-wrap:wrap;gap:5px;align-items:center}
+#mmc-root-v1 .mmc-scope-chip{display:inline-flex;align-items:center;gap:4px;min-height:28px;padding:2px 9px;border:1px solid var(--mv-line-2);border-radius:6px;background:var(--mv-paper);color:var(--mv-ink-2);font-size:var(--t-2xs);cursor:pointer}
+#mmc-root-v1 .mmc-scope-chip input{width:13px;height:13px;margin:0;accent-color:var(--mv-accent-2)}
+#mmc-root-v1 .mmc-scope-chip.is-on{border-color:var(--mv-accent-2);background:color-mix(in srgb,var(--mv-accent-2) 10%,var(--mv-paper));color:var(--mv-ink)}
+#mmc-root-v1 .mmc-scope-warn{color:var(--mv-warn)!important;font-size:var(--t-2xs);line-height:1.5}
+#mmc-root-v1 .mmc-hold-row{display:flex;align-items:center;justify-content:space-between;gap:10px;cursor:default}
+#mmc-root-v1 .mmc-hold-row>span:first-child{min-width:0;flex:1}
+#mmc-root-v1 .mmc-hold-actions{display:flex;gap:6px;flex-shrink:0;flex-wrap:wrap;justify-content:flex-end}
+#mmc-root-v1 .mmc-hold-group-actions{margin-left:auto}
+@media (max-width:520px){#mmc-root-v1 .mmc-hold-row{flex-direction:column;align-items:stretch}#mmc-root-v1 .mmc-hold-actions{justify-content:flex-start}}
+/* v2.1 · 장면 기억 */
+#mmc-root-v1 .mmc-episode-note{display:flex;flex-direction:column;gap:2px;min-width:0}
+#mmc-root-v1 .mmc-episode-note small{color:var(--mv-muted);font-size:var(--t-xs)}
+#mmc-root-v1 .mmc-episode-list{display:grid;gap:12px}
+#mmc-root-v1 .mmc-episode{padding:14px 16px}
+#mmc-root-v1 .mmc-episode.is-replaced{opacity:.72}
+#mmc-root-v1 .mmc-episode-head{display:flex;align-items:flex-start;gap:10px;margin-bottom:8px}
+#mmc-root-v1 .mmc-episode-head>div{flex:1;min-width:0}
+#mmc-root-v1 .mmc-episode-head b{display:block;font-size:var(--t-md)}
+#mmc-root-v1 .mmc-episode-head small{display:block;margin-top:2px;color:var(--mv-muted);font-size:var(--t-xs)}
+#mmc-root-v1 .mmc-episode-grid{display:grid;gap:8px;margin:0}
+#mmc-root-v1 .mmc-episode-grid>div{display:grid;grid-template-columns:52px minmax(0,1fr);gap:10px}
+#mmc-root-v1 .mmc-episode-grid dt{color:var(--mv-muted);font-size:var(--t-2xs);font-weight:700;padding-top:2px}
+#mmc-root-v1 .mmc-episode-grid dd{margin:0;color:var(--mv-ink-2);font-size:var(--t-xs);line-height:1.55;min-width:0}
+#mmc-root-v1 .mmc-episode-grid dd small{display:block;color:var(--mv-muted);margin-top:2px}
+#mmc-root-v1 .mmc-episode-grid ul,#mmc-root-v1 .mmc-episode-cand ul{margin:4px 0 0;padding-left:16px}
+#mmc-root-v1 .mmc-episode-facts{list-style:none;padding-left:0!important;display:grid;gap:4px}
+#mmc-root-v1 .mmc-episode-facts li{display:flex;flex-wrap:wrap;align-items:center;gap:5px}
+#mmc-root-v1 .mmc-episode-facts li>span:not(.mmc-chip){flex:1 1 180px;min-width:0}
+#mmc-root-v1 .mmc-episode-facts .mmc-scope{flex:1 1 100%;margin-top:2px;padding-top:4px}
+#mmc-root-v1 .mmc-episode-people{list-style:none;padding-left:0!important;display:grid;gap:4px}
+#mmc-root-v1 .mmc-episode-old{margin-top:14px}
+#mmc-root-v1 .mmc-episode-old summary{cursor:pointer;color:var(--mv-muted);font-size:var(--t-xs);margin-bottom:8px}
+#mmc-root-v1 .mmc-episode-cand{display:flex;gap:10px;align-items:flex-start;cursor:default}
+#mmc-root-v1 .mmc-episode-cand>span{flex:1;min-width:0}
+#mmc-root-v1 .mmc-scope-note{display:block;color:var(--mv-ink-2);font-size:var(--t-2xs);margin-top:4px}
+#mmc-root-v1 .mmc-episode-fact-edit{display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin-bottom:6px}
+#mmc-root-v1 .mmc-episode-fact-edit select{flex:0 0 auto;min-height:36px}
+#mmc-root-v1 .mmc-episode-fact-edit input{flex:1 1 200px;min-width:0;min-height:36px}
+#mmc-root-v1 .mmc-episode-fact-edit .mmc-scope{flex:1 1 100%}
+/* v2.1 · 진행 흐름 */
+#mmc-root-v1 .mmc-meter i.is-thread,#mmc-root-v1 .mmc-legend .is-thread i{background:var(--mv-warn)}
+#mmc-root-v1 .mmc-preview-block.is-thread>header{border-left:4px solid var(--mv-warn)}
+#mmc-root-v1 .mmc-thread{padding:14px 16px}
+#mmc-root-v1 .mmc-thread.is-resolved,#mmc-root-v1 .mmc-thread.is-cancelled{opacity:.75}
+#mmc-root-v1 .mmc-thread-state{margin:2px 0 6px;color:var(--mv-ink);font-size:var(--t-sm);line-height:1.55;white-space:pre-wrap}
+#mmc-root-v1 .mmc-thread-actions{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px}
+#mmc-root-v1 .mmc-thread-history{margin-top:10px}
+#mmc-root-v1 .mmc-thread-history summary{cursor:pointer;color:var(--mv-muted);font-size:var(--t-xs)}
+#mmc-root-v1 .mmc-thread-history ol{list-style:none;margin:8px 0 0;padding:0 0 0 10px;border-left:2px solid var(--mv-line);display:grid;gap:6px}
+#mmc-root-v1 .mmc-thread-history li{display:flex;flex-wrap:wrap;align-items:center;gap:5px;font-size:var(--t-xs);color:var(--mv-ink-2)}
+#mmc-root-v1 .mmc-thread-history li>span:not(.mmc-chip){flex:1 1 200px;min-width:0}
+#mmc-root-v1 .mmc-thread-history li small{flex:1 1 100%;color:var(--mv-muted);font-size:var(--t-2xs)}
+#mmc-root-v1 .mmc-scope-note .mmc-svg{width:12px;height:12px;vertical-align:-2px;margin-right:3px}
+/* v2.1.1 · 후보 전체 선택·전체 보류 */
+#mmc-root-v1 .mmc-bulk-toolbar{flex-wrap:wrap;row-gap:8px}
+#mmc-root-v1 .mmc-bulk-count{display:flex;flex-direction:column;gap:2px;min-width:0;flex:1 1 180px}
+#mmc-root-v1 .mmc-bulk-actions{display:flex;gap:6px;flex:0 0 auto}
+#mmc-root-v1 .mmc-bulk-actions .mmc-btn{white-space:nowrap}
+@media(max-width:700px){#mmc-root-v1 .mmc-bulk-toolbar{flex-direction:column;align-items:stretch}
+#mmc-root-v1 .mmc-bulk-count{flex:0 0 auto}
+#mmc-root-v1 .mmc-bulk-actions{width:100%}
+#mmc-root-v1 .mmc-bulk-actions .mmc-btn{flex:1 1 0;min-height:36px}}
 
 /* SillyTavern host theme and stacking context. */
 #mmc-root-v1,.mmc-launcher,.mmc-toast {

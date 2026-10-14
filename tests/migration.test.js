@@ -1,5 +1,15 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+test('resolved branch hold null round trips', () => {
+    assert.equal(parseImport('{"items":[],"branchHold":null}').branchHold, null);
+});
+test('new layer import validates scopes and bounded histories', () => {
+    assert.throws(() => parseImport(JSON.stringify({ items: [], threads: [{}] })), /형식/);
+    assert.throws(() => parseImport(JSON.stringify({ items: [], episodes: [{ title: 'x', facts: 'invalid' }] })), /형식/);
+    assert.throws(() => parseImport(JSON.stringify({ items: [{ knownBy: {} }] })), /형식/);
+    const data = parseImport(JSON.stringify({ items: [{ knownBy: ['unknown'] }], episodes: [], threads: [] }));
+    assert.deepEqual(data.items[0].knownBy, ['unknown']);
+});
 import { parseImport, exportData, MAX_IMPORT_BYTES } from '../migration.js';
 
 const data = { version: 1, items: [{ id: 'promise', content: 'Keep canonical English', contentKo: '한국어 표시본' }], elementMemory: { entities: [] }, wiki: { docs: [] } };

@@ -1,6 +1,6 @@
 {
   "name": "memory-vault-sillytavern",
-  "version": "2.0.0-st.1",
+  "version": "2.1.1-st.1",
   "private": true,
   "type": "module",
   "scripts": {

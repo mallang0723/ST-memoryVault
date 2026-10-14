@@ -53,13 +53,27 @@ try {
     await page.goto(base);
     await page.waitForFunction(() => window.SillyTavern?.getContext && document.getElementById('mmc-launcher-v1'), null, { timeout: 60000 });
     const onboarding = page.locator('dialog[open]').filter({ hasText: 'Welcome to SillyTavern!' });
-    if (await onboarding.count()) await onboarding.locator('.popup-button-ok').click();
+    await page.waitForFunction(() => SillyTavern.getContext().characters.length || [...document.querySelectorAll('dialog[open]')].some(d => d.textContent.includes('Welcome to SillyTavern!')));
+    if (await onboarding.count()) {
+        await onboarding.locator('textarea').fill('QA User');
+        await onboarding.getByText('Save', { exact: true }).click();
+    }
+    await page.evaluate(async () => {
+        const ctx = SillyTavern.getContext();
+        for (const name of ['QA Alice', 'QA Bob']) {
+            if (ctx.characters.some(c => c.name === name)) continue;
+            const response = await fetch('/api/characters/create', { method: 'POST', headers: ctx.getRequestHeaders(), body: JSON.stringify({ ch_name: name, description: `Synthetic ${name}`, first_mes: 'Synthetic QA greeting.' }) });
+            if (!response.ok) throw new Error('synthetic character create');
+        }
+        await (await import('/script.js')).getCharacters();
+    });
     await page.waitForFunction(() => SillyTavern.getContext().characters.length > 0, null, { timeout: 60000 });
     check('extension module and native settings/menu load');
     await page.evaluate(async name => {
         await SillyTavern.getContext().selectCharacterById(0);
         await SillyTavern.getContext().openCharacterChat(name);
         const ctx = SillyTavern.getContext();
+        ctx.chat.forEach(m => { m.send_date = new Date().toISOString(); });
         ctx.chatMetadata.world_info = 'Eldoria';
         await ctx.saveMetadata();
     }, chatName);
@@ -134,10 +148,11 @@ try {
         return d?.lorebookId && d.lorebookId !== oldBook && d.ownerChatId.startsWith('st:');
     }, saved.lorebookId, { timeout: 30000 });
     const branch = await getData();
-    assert.equal(branch.items.length, 2);
+    assert.equal(branch.items.length, 0);
+    assert.equal(branch.branchHold.items.length, 2);
     assert.notEqual(branch.ownerChatId, saved.ownerChatId);
-    assert.ok((await scan('Jihee cup')).includes('The cup is yellow.'));
-    check('native branch inherits memory with independent ownership and World Info file');
+    assert.ok(!(await scan('Jihee cup')).includes('The cup is yellow.'));
+    check('native branch splits ownership and holds post-cutoff or uncertain memory without injection');
 
     await page.evaluate(async name => { await SillyTavern.getContext().openCharacterChat(name); }, `${chatName} unrelated`);
     await openVault();
@@ -168,6 +183,11 @@ try {
     // Exercise the real generateRaw pipeline with a deterministic local HTTP
     // response. No API key and no external provider request are used here.
     let modelCalls = 0;
+    await page.locator('#main_api').selectOption('openai', { force: true });
+    await page.evaluate(async () => {
+        const { oai_settings } = await import('/scripts/openai.js');
+        oai_settings.stream_openai = false;
+    });
     await page.route('**/api/backends/chat-completions/generate', async route => {
         const request = route.request().postDataJSON();
         const prompt = JSON.stringify(request.messages);
@@ -203,6 +223,8 @@ try {
     assert.ok((await scan('RelayBell')).includes('RelayBell is brass.'));
     check('real generateRaw + mocked provider: source extraction, candidate review, explicit save, no added chat message');
 
+    const { verifyV211 } = await import('./browser-v211.mjs');
+    await verifyV211({ page, root, click, importMemory, waitSaved, getData, scan, check });
     assert.deepEqual(errors, [], 'browser must not have uncaught errors');
     console.log('All browser scenarios passed; no real model provider was called.');
 } catch (error) {

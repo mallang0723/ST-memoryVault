@@ -1,9 +1,27 @@
 import { DATA_KEY } from './migration.js';
-import { WORLD_KEY, compileWorldInfo, removeManagedEntries } from './world-info.js';
+import { WORLD_KEY, compileWorldInfo, compileLegacyWorldInfo, removeManagedEntries } from './world-info.js';
 
 export const HOST_KEY = 'memoryVaultHost';
 export const SETTINGS_KEY = 'memoryVault';
 const clone = value => value === undefined ? undefined : structuredClone(value);
+function characterScope(ctx) {
+    const group = (ctx.groups || []).find(g => String(g.id) === String(ctx.groupId));
+    const characters = ctx.groupId ? (ctx.characters || []).filter(c => group?.members?.includes(c.avatar)) : [ctx.characters?.[ctx.characterId]].filter(Boolean);
+    const raw = group?.generation_mode;
+    const mode = !ctx.groupId || raw === 0 || raw === '0' || raw === 'swap' ? 'swap' : raw === 1 || raw === '1' ? 'append' : 'append_disabled';
+    return { characters, mode };
+}
+function normalizedDate(value) {
+    if (typeof value === 'number' && Number.isFinite(value)) return new Date(value < 1e11 ? value * 1000 : value).toISOString();
+    if (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}T.*(?:Z|[+-]\d{2}:?\d{2})$/.test(value)) return '';
+    const ms = Date.parse(value);
+    return Number.isFinite(ms) ? new Date(ms).toISOString() : '';
+}
+async function messageBoundary(chat, hashString) {
+    const text = JSON.stringify((chat || []).map(m => [!!m.is_user, !!m.is_system, m.mes, m.send_date, m.swipe_id]));
+    const hash = hashString ? await hashString(text) : Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(text))), n => n.toString(16).padStart(2, '0')).join('');
+    return { count: chat?.length || 0, hash, at: normalizedDate(chat?.at(-1)?.send_date) };
+}
 
 export function chatIdentity(ctx) {
     if (!ctx.chatId || (!ctx.groupId && ctx.characterId === undefined)) return '';
@@ -28,13 +46,15 @@ export function chatSnapshot(ctx) {
     metadata.advancedMemory = { enabled: false };
     metadata.summaryEntries = (ctx.chat || []).flatMap((message, index) => {
         const content = message.extra?.memory;
-        return typeof content === 'string' && content.trim() ? [{
+        return !message.is_system && typeof content === 'string' && content.trim() && !/\{\{#if\s+char\s*==/i.test(content) ? [{
             id: `st-summary:${index}`, title: `${index + 1}번째 메시지 요약`, content,
             enabled: true, origin: 'sillytavern-summary', updatedAt: String(message.send_date || ''),
         }] : [];
     });
     metadata.summary = metadata.summaryEntries.at(-1)?.content || '';
-    return { id, name: String(ctx.chatId), mode: 'rp', connectionId: 'sillytavern-current', metadata };
+    const scopeInfo = characterScope(ctx);
+    metadata.groupChatMode = scopeInfo.mode === 'swap' ? 'individual' : 'merged';
+    return { id, name: String(ctx.chatId), mode: 'rp', characterIds: scopeInfo.characters.map(c => c.avatar), connectionId: 'sillytavern-current', metadata };
 }
 
 export function createHost({ getContext, fetchImpl = globalThis.fetch, worldInfo = {}, reportError = console.error, isGenerating = () => false, hashString }) {
@@ -89,6 +109,7 @@ export function createHost({ getContext, fetchImpl = globalThis.fetch, worldInfo
         const hostState = {
             ...(target[HOST_KEY] || {}),
             chatName: String(ctx.chatId), scope: chatId.slice(0, chatId.lastIndexOf(':')),
+            sourceBoundary: await messageBoundary(ctx.chat, hashString),
         };
         if (patch.activeLorebookIds) hostState.activeLorebookIds = clone(patch.activeLorebookIds);
         const allowed = Object.fromEntries(Object.entries(patch).filter(([key]) => [DATA_KEY, 'memoryVaultImportBackup'].includes(key)));
@@ -128,8 +149,30 @@ export function createHost({ getContext, fetchImpl = globalThis.fetch, worldInfo
         assertChat(chatId);
         if (transaction?.chatId !== chatId || !transaction.book) throw new Error('동기화할 로어북이 없습니다.');
         const book = clone(transaction.book);
-        const data = compileWorldInfo(book, worldInfo.template);
-        await post('/api/worldinfo/edit', { name: book.id, data });
+        const data = compileWorldInfo(book, worldInfo.template, characterScope(getContext()));
+        const existing = await post('/api/worldinfo/get', { name: book.id });
+        const previous = existing?.extensions?.[WORLD_KEY];
+        let baseline = existing?.extensions?.memoryVaultBaseline;
+        const canonical = value => JSON.stringify(value, (_key, v) => v && typeof v === 'object' && !Array.isArray(v) ? Object.fromEntries(Object.entries(v).sort(([a], [b]) => a.localeCompare(b))) : v);
+        if (previous && !baseline) {
+            try { baseline = compileLegacyWorldInfo(previous, worldInfo.template).entries; }
+            catch { throw new Error('관리 World Info 직접 편집 충돌: 이전 구조화 책의 기준을 재구성할 수 없습니다. 원본을 보존했습니다.'); }
+        }
+        for (const key of Object.keys(baseline || {})) {
+            if (!existing.entries?.[key] || canonical(existing.entries[key]) !== canonical(baseline[key])) throw new Error('관리 World Info 직접 편집 충돌: 항목이 삭제되거나 변경되었습니다.');
+        }
+        for (const [key, entry] of Object.entries(existing?.entries || {})) {
+            if (entry.extensions?.[WORLD_KEY]) {
+                const expected = baseline?.[key];
+                if (!expected || canonical(entry) !== canonical(expected)) throw new Error('관리 World Info 직접 편집 충돌: 변경 내용을 보관함에 반영한 뒤 다시 동기화해 주세요.');
+            } else {
+                let uid = Number(key);
+                while (Object.hasOwn(data.entries, uid)) uid++;
+                data.entries[uid] = { ...clone(entry), uid };
+            }
+        }
+        data.extensions = { ...clone(existing?.extensions || {}), ...data.extensions, memoryVaultBaseline: clone(Object.fromEntries(Object.entries(data.entries).filter(([, entry]) => entry.extensions?.[WORLD_KEY]))) };
+        await post('/api/worldinfo/edit', { name: book.id, data: { ...clone(existing || {}), ...data } });
         cache.set(book.id, clone(book));
         worldInfo.cache?.set(book.id, clone(data));
         await getContext().eventSource.emit(getContext().eventTypes.WORLDINFO_UPDATED, book.id, clone(data));
@@ -173,6 +216,11 @@ export function createHost({ getContext, fetchImpl = globalThis.fetch, worldInfo
         const parts = url.pathname.split('/').filter(Boolean).map(decodeURIComponent);
         const method = (options.method || 'GET').toUpperCase();
         const body = typeof options.body === 'string' ? JSON.parse(options.body) : options.body || {};
+        if (parts[0] === 'characters' && method === 'GET') {
+            const rows = characterScope(getContext()).characters.filter(c => c.avatar === parts[1]);
+            if (rows.length !== 1) throw new Error('인물 ID를 확인할 수 없습니다.');
+            return { id: rows[0].avatar, name: rows[0].name || rows[0].avatar };
+        }
         if (parts[0] === 'chats') {
             const view = chatSnapshot(getContext());
             if (parts.length === 1) return view ? [view] : [];
@@ -182,6 +230,7 @@ export function createHost({ getContext, fetchImpl = globalThis.fetch, worldInfo
                 const messages = ctx.chat.map((m, i) => ({
                     id: `st-message:${i}`, role: m.is_system ? 'system' : m.is_user ? 'user' : 'assistant',
                     content: String(m.mes || ''), createdAt: String(m.send_date || ''), name: m.name,
+                    activeSwipeIndex: Number(m.swipe_id) || 0,
                 }));
                 const limit = Number(url.searchParams.get('limit'));
                 return limit > 0 ? messages.slice(-limit) : messages;
@@ -246,8 +295,11 @@ export function createHost({ getContext, fetchImpl = globalThis.fetch, worldInfo
             const book = await readBook(data.lorebookId, true);
             assertChat(chatId);
             if (!book || book.chatId !== chatId) return;
-            const compiled = compileWorldInfo(book, worldInfo.template);
+            const scope = characterScope(ctx);
+            const compiled = compileWorldInfo(book, worldInfo.template, scope);
+            const responder = ctx.characters?.[ctx.characterId]?.avatar?.replace(/\.[^.]+$/, '');
             lists.chatLore.push(...Object.values(compiled.entries).filter(entry => !entry.disable)
+                .filter(entry => !entry.characterFilter.names.length || entry.characterFilter.names.includes(responder))
                 .map(entry => ({ ...entry, world: book.id })));
         } catch (error) { reportError(error); }
     }
@@ -290,6 +342,16 @@ export function createHost({ getContext, fetchImpl = globalThis.fetch, worldInfo
 
     return {
         api, beginSync, commitSync, endSync, start, inject,
+        async getBranchCutPoint(id) {
+            const ctx = assertChat(id);
+            const view = chatSnapshot(ctx);
+            if (!view.metadata.branchParentChatId) return null;
+            const saved = ctx.chatMetadata?.[HOST_KEY]?.sourceBoundary;
+            const current = await messageBoundary(ctx.chat, hashString);
+            assertChat(id);
+            if (!saved?.at || saved.count !== current.count || saved.hash !== current.hash || saved.at !== current.at) return null;
+            return { at: saved.at, messageId: `st-message:${saved.count - 1}` };
+        },
         getCurrentChatId: () => chatIdentity(getContext()),
         onChange(callback) { listeners.add(callback); return () => listeners.delete(callback); },
         storage: {
