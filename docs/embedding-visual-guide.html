@@ -1,0 +1,108 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>기억 보관함 — 한글 질문으로 영어 기억 찾기</title>
+<style>
+:root{color-scheme:light;--ink:#202438;--muted:#596078;--line:#dce0eb;--purple:#6341c6;--purple-bg:#f1edff;--blue:#23629e;--blue-bg:#edf6ff;--green:#206c51;--green-bg:#edf8f1;--amber:#865819;--amber-bg:#fff7e7}
+*{box-sizing:border-box}body{margin:0;background:#f5f6fa;color:var(--ink);font:17px/1.65 system-ui,-apple-system,"Segoe UI",sans-serif;word-break:keep-all}main{max-width:1040px;margin:auto;padding:40px 24px 60px}h1,h2,h3,p{margin:0}h1{font-size:clamp(27px,4.8vw,43px);line-height:1.35;letter-spacing:-1.5px;margin:12px 0}h2{font-size:26px;line-height:1.4;letter-spacing:-.7px}h3{font-size:19px;line-height:1.45}button,input{font:inherit}button{cursor:pointer}button:focus-visible,a:focus-visible,input:focus-visible{outline:3px solid var(--blue);outline-offset:4px}code{font-size:.9em;overflow-wrap:anywhere}header{margin-bottom:30px}.eyebrow{font-size:13px;font-weight:800;letter-spacing:1px;color:var(--purple)}.lede{font-size:20px;color:var(--muted);max-width:780px}.demo-label{display:inline-block;font-size:13px;color:var(--muted);background:#e9ebf2;border-radius:5px;padding:3px 9px;margin-top:16px}.panel{margin:22px 0;background:white;border:1px solid var(--line);border-radius:20px;padding:30px;box-shadow:0 6px 20px #20243804}.title-row{display:flex;align-items:flex-start;gap:13px;margin-bottom:22px}.number{display:grid;place-items:center;background:var(--purple-bg);color:var(--purple);font-size:17px;font-weight:800;border-radius:10px;min-width:35px;height:35px}.subtitle{color:var(--muted);font-size:16px;margin-top:5px}.cards{display:grid;grid-template-columns:1fr 1fr;gap:18px}.card{border:1px solid var(--line);border-radius:14px;padding:20px;position:relative}.source{background:var(--purple-bg);border-color:#d2c4f7}.translation{background:#f7f8fb}.label{font-size:13px;font-weight:800;letter-spacing:.4px;margin-bottom:8px;color:var(--muted)}.source .label{color:var(--purple)}.text{font-size:21px;line-height:1.6}.tag{display:inline-block;margin-top:15px;border-radius:6px;font-size:14px;font-weight:700;padding:4px 9px;background:white;color:var(--purple)}.translation .tag{color:var(--muted);background:#e8ebf3}.bridge{text-align:center;padding:12px 6px;color:var(--purple);font-weight:750}.query{padding:17px 20px;background:var(--blue-bg);border-radius:12px;color:#174c7e}.query strong{font-size:22px}.flow{display:grid;grid-template-columns:1fr 32px 1fr 32px 1fr;align-items:stretch;margin-top:18px;gap:7px}.flowbox{padding:18px 14px;border:1px solid var(--line);border-radius:12px;text-align:center;display:flex;flex-direction:column;justify-content:center}.flowbox strong{font-size:20px}.flowbox span{font-size:14px;color:var(--muted);margin-top:5px}.flowbox.purple{background:var(--purple-bg);border-color:#d2c4f7}.flowbox.green{background:var(--green-bg);border-color:#c4e2d2}.arrow{display:grid;place-items:center;font-size:27px;color:#8890a6}.answer{margin-top:17px;padding:14px 18px;border-left:4px solid var(--green);background:var(--green-bg)}.note{font-size:15px;color:var(--muted);margin-top:17px}.takeaway{margin-top:22px;font-size:18px;font-weight:700}.scope-status{display:flex;flex-wrap:wrap;gap:8px;margin-bottom:16px}.pill{font-size:14px;font-weight:700;border-radius:100px;background:var(--green-bg);color:var(--green);padding:5px 11px}.library{display:grid;grid-template-columns:repeat(3,1fr);gap:13px}.book{border:2px solid #c8b9f4;background:var(--purple-bg);border-radius:12px;padding:18px 16px;min-height:176px;display:flex;flex-direction:column;gap:7px}.book-symbol{width:31px;height:36px;background:var(--purple);border-radius:3px 6px 6px 3px;border-left:5px solid #41298d;box-shadow:inset -4px 0 #ffffff35}.book-title{font-weight:800;font-size:19px}.book small{color:var(--muted);font-size:14px}.book .status{font-size:14px;color:var(--purple);font-weight:750;margin-top:auto}.book.inactive{background:#f7f8fb;border-color:#dce0eb}.book.inactive .book-symbol{background:#8990a3;border-left-color:#656d81}.book.inactive .status{color:var(--muted)}.control{display:flex;align-items:center;gap:11px;cursor:pointer;margin-top:17px;padding:14px;background:#f7f8fb;border-radius:10px}.control input{width:21px;height:21px;accent-color:var(--purple);flex-shrink:0}.scope-result{margin-top:13px;font-weight:750;color:var(--purple)}.delivery{display:grid;grid-template-columns:1fr 1fr;gap:18px}.delivery .card{padding:22px}.provider{background:var(--amber-bg);border-color:#e9d1a6}.generator{background:var(--green-bg);border-color:#bfdacb}.service-name{font-size:14px;color:var(--muted);margin:3px 0 16px}.packet{border:1px solid #e2cdab;border-radius:9px;background:#fffdf8;padding:13px;margin-top:10px}.packet strong{display:block;font-size:17px}.packet small{color:var(--muted);font-size:14px}.generator .packet{border-color:#bed8c9;background:#fbfefc}.packet.selected{border-left:4px solid var(--green)}.packet.out{border-style:dashed;background:#f4f5f7;color:#6d7486}.budget-controls{display:flex;gap:7px;margin:17px 0 12px;flex-wrap:wrap}.budget-controls button{padding:7px 12px;border:1px solid #bfd3c7;border-radius:8px;background:white;color:var(--green);font-size:15px;font-weight:700}.budget-controls button[aria-pressed=true]{background:var(--green);color:white;border-color:var(--green)}.caption{font-size:14px;color:var(--muted);margin-top:12px}.footer{color:var(--muted);font-size:13px;padding:4px 6px}.footer p+p{margin-top:7px}a{color:var(--purple);text-decoration-thickness:1px;text-underline-offset:3px}.summary{background:var(--ink);color:white;padding:24px 27px;border-radius:15px;margin:25px 0;font-size:21px;line-height:1.65}.summary b{color:#d2c1ff}[hidden]{display:none!important}
+@media(max-width:720px){main{padding:25px 15px 40px}.panel{padding:22px 18px;border-radius:15px}h2{font-size:23px}.delivery{grid-template-columns:1fr}.library{grid-template-columns:1fr}.book{min-height:auto;display:grid;grid-template-columns:35px 1fr;column-gap:12px}.book-symbol{grid-row:1/4}.book .status{margin:0}.flow{grid-template-columns:1fr;gap:4px}.arrow{transform:rotate(90deg);height:29px}.flowbox{padding:13px}.flowbox span{margin:0}.summary{font-size:19px}.text{font-size:19px}}
+@media(max-width:510px){.cards{grid-template-columns:1fr;gap:11px}.query strong{font-size:20px}.lede{font-size:18px}.card{padding:16px}.title-row{gap:9px}.number{min-width:30px;height:30px}.panel{padding:20px 15px}.control{font-size:15px}}
+@media print{body{background:white}main{padding:0}.panel{break-inside:avoid;box-shadow:none}.control,.budget-controls{display:none}.panel{border-color:#bbb}}
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <div class="eyebrow">MEMORY VAULT · 그림으로 이해하기</div>
+    <h1>한글로 물어도,<br>영어로 저장한 기억을 찾을 수 있어요.</h1>
+    <p class="lede">다국어 임베딩은 문장의 <strong>뜻을 비교해서</strong> 기억을 찾습니다.<br>찾은 기억의 원문을 대화 AI에게 함께 보내는 방식이에요.</p>
+    <span class="demo-label">이해를 돕는 예시 화면 · 실제 설정이나 API를 바꾸지 않습니다</span>
+  </header>
+
+  <section class="panel" aria-labelledby="language-title">
+    <div class="title-row"><span class="number">1</span><div><h2 id="language-title">한 기억에 ‘원문’과 ‘읽기용 번역’이 있어요.</h2><p class="subtitle">예를 들어 보관함이 이 기억을 영어로 작성했다면:</p></div></div>
+    <div class="cards">
+      <div class="card source"><div class="label">저장된 원문 · 영어</div><p class="text" lang="en">Mira hid the key<br>under the old oak tree.</p><span class="tag">검색 대상 → 대화 AI에게 전달</span></div>
+      <div class="card translation"><div class="label">보관함에서 내가 읽는 번역 · 한글</div><p class="text">미라는 열쇠를<br>오래된 참나무 밑에 숨겼다.</p><span class="tag">같은 기억을 읽기 쉽게 표시</span></div>
+    </div>
+    <p class="bridge">같은 내용이므로, 검색용 기억을 두 개 만들 필요가 없어요.</p>
+    <div class="query"><div class="label">내가 채팅에 입력</div><strong>“미라가 열쇠를 어디 숨겼더라?”</strong></div>
+    <div class="flow" aria-label="한글 질문의 의미를 비교하고 영어 원문을 찾아 대화 AI에게 전달합니다">
+      <div class="flowbox"><strong>뜻으로 검색</strong><span>한글 질문 ↔ 영어 기억</span></div><div class="arrow" aria-hidden="true">→</div>
+      <div class="flowbox purple"><strong>영어 원문 발견</strong><span>찾은 원문을 그대로 사용</span></div><div class="arrow" aria-hidden="true">→</div>
+      <div class="flowbox green"><strong>대화 AI가 읽음</strong><span>현재 대화 + 찾은 기억</span></div>
+    </div>
+    <div class="answer"><strong>답변 예시</strong>　“오래된 참나무 밑에 숨겼어.”</div>
+    <p class="note">원문이 한국어라면 한국어 원문을 검색·전달합니다. 여기서는 한영 검색이 성공한 상황을 그렸으며, 실제 검색·답변은 모델과 설정에 따라 달라집니다.</p>
+  </section>
+
+  <section class="panel" aria-labelledby="scope-title">
+    <div class="title-row"><span class="number">2</span><div><h2 id="scope-title">‘모든 항목’은 어디까지 찾는다는 뜻일까요?</h2><p class="subtitle">지금 채팅에 연결된 로어북의 활성 항목까지 검색한다는 뜻이에요.</p></div></div>
+    <div class="scope-status"><span class="pill">World Info 검색 켜짐</span><span class="pill">모든 항목 검색 켜짐</span></div>
+    <div class="library">
+      <div class="book"><div class="book-symbol" aria-hidden="true"></div><div class="book-title">현재 채팅의 기억 보관함</div><small>확장이 자동으로 연결</small><div class="status">✓ 검색 대상</div></div>
+      <div class="book" id="other-book"><div class="book-symbol" aria-hidden="true"></div><div class="book-title">캐릭터 설정 로어북</div><small id="other-detail">내가 현재 채팅에 연결한 책</small><div class="status" id="other-status">✓ 이것도 검색 대상</div></div>
+      <div class="book inactive"><div class="book-symbol" aria-hidden="true"></div><div class="book-title">다른 이야기의 로어북</div><small>저장만 하고 연결하지 않은 책</small><div class="status">검색 대상 아님</div></div>
+    </div>
+    <label class="control" hidden id="scope-control"><input id="connected" type="checkbox" checked> 예시에서 ‘캐릭터 설정 로어북’ 연결하기 / 빼기</label>
+    <p id="scope-result" class="scope-result" aria-live="polite">현재 보관함 + 연결된 캐릭터 설정 로어북을 함께 검색해요.</p>
+    <p class="note">‘내가 가진 모든 로어북 파일’을 뒤지는 뜻은 아닙니다. 비활성 항목과 보관함의 AI 참조 제외 문서는 대상에서 빠집니다.</p>
+    <p class="takeaway">서로 다른 정보가 담긴 한글·영어 로어북이라면, 둘 다 연결하면 돼요.</p>
+  </section>
+
+  <section class="panel" aria-labelledby="sending-title">
+    <div class="title-row"><span class="number">3</span><div><h2 id="sending-title">외부 API에는 무엇이 전달될까요?</h2><p class="subtitle">‘기억을 찾는 서비스’와 ‘답변을 만드는 모델’을 나눠 보면 쉬워요.</p></div></div>
+    <div class="delivery">
+      <div class="card provider">
+        <div class="label">① 기억 찾기 담당 · 임베딩 API</div>
+        <h3>검색할 내용을 받아<br>의미를 비교할 숫자로 바꿔요.</h3>
+        <p class="service-name">예: OpenAI / Google / OpenRouter / NanoGPT</p>
+        <div class="packet"><strong>검색 대상인 로어북 내용</strong><small>처음 등록하거나 내용이 바뀔 때 전송</small></div>
+        <div class="packet"><strong>최근 대화 메시지</strong><small>지금 어떤 기억을 찾을지 정할 때 전송</small></div>
+        <p class="caption">이 숫자를 이용한 유사도 검색은 SillyTavern 쪽에서 진행합니다. 외부 API를 선택하면 위의 텍스트가 해당 서비스로 나갑니다.</p>
+      </div>
+      <div class="card generator">
+        <div class="label">② 답변 담당 · 평소 쓰는 채팅 모델</div>
+        <h3>대화에 찾은 기억을 더해서<br>답변을 만들어요.</h3>
+        <p class="service-name">예: 평소 연결한 Claude / Gemini / GPT</p>
+        <div class="packet"><strong>평소 보내는 대화와 설정</strong></div>
+        <div class="packet selected"><strong>+ 열쇠를 숨긴 장소</strong><small>검색된 기억의 원문</small></div>
+        <div class="packet out" id="extra-memory"><strong id="extra-title">공간 부족: 함께 발견한 다른 기억</strong><small id="extra-detail">이번 요청에서는 빠진다고 가정</small></div>
+        <div class="budget-controls" hidden id="budget-controls" role="group" aria-label="설명용 World Info 예산 변경"><button type="button" data-budget="small" aria-pressed="true">기억 공간 작게</button><button type="button" data-budget="large" aria-pressed="false">기억 공간 넉넉하게</button></div>
+        <p class="caption" id="budget-result" aria-live="polite">World Info 예산 = 기억을 넣을 수 있는 분량 한도. 관련 기억을 찾아도 공간이 모자라면 일부는 빠질 수 있어요.</p>
+      </div>
+    </div>
+    <p class="note">공간 그림은 원리를 단순화한 예시입니다. 실제 예산은 토큰으로 계산하며 항목 길이·우선순위·상시 기억 등도 영향을 줍니다. 두 담당에 서로 다른 제공자를 선택해도 됩니다.</p>
+  </section>
+
+  <div class="summary">기억은 <b>원문으로 저장</b>하고,<br>다국어 검색으로 <b>필요한 기억을 찾아</b>,<br>들어갈 공간만큼 <b>대화 AI에게 함께 보내는 것</b>이에요.</div>
+  <footer class="footer">
+    <p>실제 설정 순서: <a href="EMBEDDINGS.md">한글·영어 임베딩 사용 안내</a></p>
+    <p>기준: Memory Vault 2.0.0-st.1 및 SillyTavern 1.19.0. <a href="https://github.com/SillyTavern/SillyTavern/blob/06bde939fb1e9c4c8d8641d810f0a916b5bce127/public/scripts/extensions/vectors/index.js">SillyTavern 검색 코드</a> · <a href="../world-info.js">확장 World Info 변환 코드</a></p>
+    <p>이 화면의 조작은 설명용입니다. 저장된 기억, 실제 설정, API에 영향을 주지 않습니다.</p>
+  </footer>
+</main>
+<script>
+const connected = document.getElementById('connected');
+document.getElementById('scope-control').hidden = false;
+document.getElementById('budget-controls').hidden = false;
+connected.addEventListener('change', () => {
+  document.getElementById('other-book').classList.toggle('inactive', !connected.checked);
+  document.getElementById('other-detail').textContent = connected.checked ? '내가 현재 채팅에 연결한 책' : '현재 채팅에서 연결을 뺀 책';
+  document.getElementById('other-status').textContent = connected.checked ? '✓ 이것도 검색 대상' : '검색 대상 아님';
+  document.getElementById('scope-result').textContent = connected.checked ? '현재 보관함 + 연결된 캐릭터 설정 로어북을 함께 검색해요.' : '이 예시에서는 현재 보관함만 검색해요.';
+});
+document.querySelectorAll('[data-budget]').forEach(button => button.addEventListener('click', () => {
+  const large = button.dataset.budget === 'large';
+  document.querySelectorAll('[data-budget]').forEach(b => b.setAttribute('aria-pressed', String(b === button)));
+  document.getElementById('extra-memory').classList.toggle('out', !large);
+  document.getElementById('extra-memory').classList.toggle('selected', large);
+  document.getElementById('extra-title').textContent = large ? '+ 함께 발견한 다른 기억' : '공간 부족: 함께 발견한 다른 기억';
+  document.getElementById('extra-detail').textContent = large ? '이 예시에서는 함께 넣을 공간이 생겼어요.' : '이번 요청에서는 빠진다고 가정';
+  document.getElementById('budget-result').textContent = large ? '공간을 늘리면 기억을 더 담을 수 있어요. 실제 주입량은 전체 대화의 한도에도 영향을 받습니다.' : 'World Info 예산 = 기억을 넣을 수 있는 분량 한도. 관련 기억을 찾아도 공간이 모자라면 일부는 빠질 수 있어요.';
+}));
+</script>
+</body>
+</html>

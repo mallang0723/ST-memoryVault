@@ -1,0 +1,12 @@
+{
+  "display_name": "기억 보관함 · Memory Vault",
+  "loading_order": 50,
+  "requires": [],
+  "optional": [],
+  "js": "index.js",
+  "css": "extension.css",
+  "author": "mallang0723",
+  "version": "2.0.0-st.1",
+  "homePage": "https://github.com/mallang0723/memoryVaultSilly",
+  "minimum_client_version": "1.19.0"
+}
