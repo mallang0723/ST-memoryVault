@@ -15,7 +15,7 @@ Marinara용 **기억 보관함 v2.1.1**의 플랫폼 독립 기능을 **SillyTav
 | 고급 메모리 AM / Keeper | 미지원, 전용 API 호출 없음 |
 | 관리 WI 잠금 | ST 잠금 계약 없음, 직접 편집 충돌 시 동기화 중단 |
 
-이 저장소는 개인 포팅 프로젝트이며 **SillyTavern·Marinara Engine의 공식 확장이 아닙니다.** 원본 출처와 허락 범위는 [NOTICE](NOTICE.md)에 기록했습니다.
+이 저장소는 개인 포팅 프로젝트이며 **SillyTavern·Marinara Engine의 공식 확장이 아닙니다.** 원본은 [원 게시글 작성자의 Marinara 확장 「기억 보관함」](https://m.dcinside.com/mini/aichatfrontend/162)입니다. 원본의 MIT 고지문과 2026-10-06 원작자의 커뮤니티 공유용 SillyTavern 이식 허락은 [NOTICE](NOTICE.md)에 기록했습니다. 이 저장소의 `LICENSE`는 AGPL-3.0으로 유지하며 원본 MIT 고지를 함께 보존합니다.
 
 ## 설치
 
@@ -148,3 +148,4 @@ npm run package
 | 2026-10-14 | 2.1.1 개발판 이식·차단 명시 |
 | 2026-10-14 | 비밀 흐름 수정·격리 QA 통과 |
 | 2026-10-15 | WI 충돌 해소·비밀 자동 적용 보호 |
+| 2026-10-15 | 원작 출처·귀속·MIT 고지 정정 |
