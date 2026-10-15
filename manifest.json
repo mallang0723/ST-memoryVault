@@ -5,7 +5,7 @@
   "optional": [],
   "js": "index.js",
   "css": "extension.css",
-  "author": "mallang0723",
+  "author": "원 게시글 작성자 (원작), mallang0723 (SillyTavern 이식)",
   "version": "2.1.1-st.1",
   "homePage": "https://github.com/mallang0723/memoryVaultSilly",
   "minimum_client_version": "1.19.0"
