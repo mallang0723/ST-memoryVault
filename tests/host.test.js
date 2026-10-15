@@ -85,6 +85,34 @@ test('all persisted WI fields detect conflicts and extensions survive', async ()
     }
 });
 
+test('explicit managed overwrite repairs conflicts once and preserves external WI data', async () => {
+    for (const mode of ['edited', 'deleted', 'marker-removed', 'legacy']) {
+        const f = fixture(); const id = await seed(f);
+        const data = f.disk.get(id);
+        data.extensions.external = { kept: true };
+        data.entries[99] = { uid: 99, content: 'external' };
+        if (mode === 'deleted') delete data.entries[0];
+        else data.entries[0].content = 'manual edit';
+        if (mode === 'marker-removed') delete data.entries[0].extensions;
+        if (mode === 'legacy') delete data.extensions.memoryVaultBaseline;
+        const before = structuredClone(data);
+        await f.host.beginSync(f.id);
+        await f.host.api(`lorebooks/${id}`, { method: 'PATCH', body: { name: 'repaired' } });
+        await assert.rejects(f.host.commitSync(f.id), /충돌/);
+        assert.deepEqual(f.disk.get(id), before);
+        await f.host.commitSync(f.id, { overwriteManaged: true });
+        assert.equal(f.disk.get(id).entries[0].content, 'Remember the promise');
+        assert.equal(f.disk.get(id).entries[99].content, 'external');
+        assert.deepEqual(f.disk.get(id).extensions.external, { kept: true });
+        assert.equal(Object.values(f.disk.get(id).entries).some(e => e.content === 'manual edit'), false);
+        f.host.endSync();
+        f.disk.get(id).entries[0].content = 'second edit';
+        await f.host.beginSync(f.id);
+        await f.host.api(`lorebooks/${id}`, { method: 'PATCH', body: { name: 'next' } });
+        await assert.rejects(f.host.commitSync(f.id), /충돌/);
+    }
+});
+
 async function seed(f) {
     await f.host.beginSync(f.id);
     const book = await f.host.api('lorebooks', { method: 'POST', body: { chatId: f.id, name: 'Vault', scanDepth: 4 } });

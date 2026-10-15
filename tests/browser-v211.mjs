@@ -44,6 +44,34 @@ export async function verifyV211({ page, root, click, importMemory, waitSaved, g
     assert.equal(data.scopeReviewHold.length, 1);
     assert.equal(data.episodes.length, 1);
     assert.equal(data.threads.length, 2);
+    await page.evaluate(async () => {
+        const ctx = SillyTavern.getContext();
+        const name = ctx.chatMetadata.memoryCabinetV1.lorebookId;
+        const post = async (path, body) => {
+            const response = await fetch(path, { method: 'POST', headers: ctx.getRequestHeaders(), body: JSON.stringify(body) });
+            if (!response.ok) throw Error(`fixture WI failed: ${response.status}`);
+            return response.json();
+        };
+        const data = await post('/api/worldinfo/get', { name });
+        Object.values(data.entries).find(e => e.extensions?.memoryVault).content = 'QA_MANUAL_WI_EDIT';
+        data.entries[90000] = { uid: 90000, content: 'QA_EXTERNAL_WI', disable: true };
+        data.extensions.qaExternal = { preserved: true };
+        await post('/api/worldinfo/edit', { name, data });
+    });
+    await root.locator('.mmc-setting-card [data-action="sync"]').click();
+    await page.waitForFunction(() => SillyTavern.getContext().chatMetadata.memoryCabinetV1.lastSyncError.includes('충돌'));
+    await click('sync-overwrite');
+    await page.waitForFunction(() => !SillyTavern.getContext().chatMetadata.memoryCabinetV1.lastSyncError);
+    await root.locator('[data-action="sync-overwrite"]').waitFor({ state: 'detached' });
+    await waitSaved();
+    const repaired = await page.evaluate(async () => {
+        const ctx = SillyTavern.getContext();
+        return (await fetch('/api/worldinfo/get', { method: 'POST', headers: ctx.getRequestHeaders(), body: JSON.stringify({ name: ctx.chatMetadata.memoryCabinetV1.lorebookId }) })).json();
+    });
+    assert.equal(Object.values(repaired.entries).some(e => e.content === 'QA_MANUAL_WI_EDIT'), false);
+    assert.equal(repaired.entries[90000].content, 'QA_EXTERNAL_WI');
+    assert.equal(repaired.extensions.qaExternal.preserved, true);
+    check('managed WI conflict is repaired by explicit UI overwrite while external data survives');
     await click('close-layer');
     await root.locator('.mmc-tab[data-tab="episode"]').click();
     assert.ok((await root.innerText()).includes('QA scene'));

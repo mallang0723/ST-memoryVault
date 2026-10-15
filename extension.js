@@ -1783,9 +1783,10 @@ When current and historical facts differ, current facts take precedence.`;
     state.sourceRows = rows.slice();
     state.sourceSelected = new Set(rows.map((row) => String(row.id || "")));
     try {
+      const restrictedContext = reviewContextHasRestricted();
       const generated = await generateReviewCandidates(rows, { showLayer: false });
       if (!generated) return;
-      if (state.summaryUpdateMode === "auto_apply" && state.reviewCandidates.some(scopeBlocksApply)) {
+      if (state.summaryUpdateMode === "auto_apply" && (restrictedContext || state.reviewCandidates.some(scopeBlocksApply))) {
         // 일부 인물만 아는 내용이 섞이면 자동 적용하지 않는다. 후보는 검토 대기에 그대로 남긴다.
         toast(`일부 인물만 아는 내용이 있어 자동 적용하지 않고 후보 ${state.reviewCandidates.length}개를 검토 대기에 남겼어요.`);
         render();
@@ -2395,20 +2396,26 @@ When current and historical facts differ, current facts take precedence.`;
     if (sameChat) state.currentData = merged;
     if (syncContentKey(merged) !== syncContentKey(synced)) state.syncAgain = true;
   }
-  async function syncLorebook({ silent = false } = {}) {
+  async function overwriteManagedWorldInfo() {
+    if (state.syncPromise || state.syncing) throw new Error("동기화가 끝난 뒤 덮어쓰기를 다시 실행해 주세요.");
+    if (!state.currentChat || !state.currentData) return;
+    if (!window.confirm("현재 채팅의 보관함 기준으로 관리 World Info 항목을 덮어쓸까요?\nWorld Info에서 직접 편집한 관리 항목은 사라집니다. 먼저 해당 World Info를 내보내고 필요한 변경을 보관함에 옮기세요. 비관리 항목은 보존합니다.")) return;
+    await syncLorebook({ overwriteManaged: true });
+  }
+  async function syncLorebook({ silent = false, overwriteManaged = false } = {}) {
     if (!state.currentChat || !state.currentData) return;
     if (state.syncPromise) { state.syncAgain = true; return state.syncPromise; }
     state.syncPromise = (async () => {
       let rounds = 0;
       do {
         state.syncAgain = false;
-        await syncLorebookOnce({ silent: silent || rounds > 0 });
+        await syncLorebookOnce({ silent: silent || rounds > 0, overwriteManaged: overwriteManaged && rounds === 0 });
         rounds += 1;
       } while (state.syncAgain && rounds < 4);
     })();
     try { return await state.syncPromise; } finally { state.syncPromise = null; }
   }
-  async function syncLorebookOnce({ silent = false } = {}) {
+  async function syncLorebookOnce({ silent = false, overwriteManaged = false } = {}) {
     if (!state.currentChat || !state.currentData) return;
     if (!ownershipAllowsData()) throw new Error("격리된 기억은 로어북에 동기화할 수 없습니다.");
     await verifyOwnershipBeforePersist();
@@ -2599,7 +2606,7 @@ When current and historical facts differ, current facts take precedence.`;
         (entry) => entry?.tag === BACKUP_ENTRY_TAG || String(entry?.content || "").includes(BACKUP_MARKER),
         backupEntryPayload(chat, data),
       );
-      await host.commitSync(chat.id);
+      await host.commitSync(chat.id, { overwriteManaged });
       await writeSyncResult(chat, data);
       state.ownershipDetachLorebookIds = [];
       if (!silent) toast("전용 로어북을 동기화했습니다.");
@@ -6518,7 +6525,7 @@ When current and historical facts differ, current facts take precedence.`;
       state.reviewEpisodeSelected = preselectEpisodes(state.reviewEpisodes);
       state.reviewThreads = extractThreadCandidates(result.rows, safeArray(recovery.rows), "summaries");
       state.reviewThreadSelected = preselectThreads(state.reviewThreads);
-      markScopeReview(state.reviewCandidates, safeArray(recovery.rows));
+      markScopeReview(state.reviewCandidates, safeArray(recovery.rows), reviewContextHasRestricted());
       state.reviewSelected = new Set(normalized.map((item, i) => item.action === "keep" || scopeBlocksApply(item) ? null : String(i)).filter(Boolean));
       state.reviewSourceRows = safeArray(recovery.rows).slice();
       await persistPendingReview();
@@ -6636,6 +6643,7 @@ When current and historical facts differ, current facts take precedence.`;
           ${scopeReviewMarkup()}
           <p class="mmc-muted">World Info의 MemoryVault_ 파일은 자동 관리됩니다. 직접 연결할 필요 없이 현재 채팅에서만 스캔해요. 실제 주입량은 SillyTavern World Info 예산의 영향을 받아요.</p>
           <div class="mmc-setting-card"><div><b>전용 로어북</b><small>${data.lorebookId ? `연결 ID ${esc(data.lorebookId)}` : "아직 생성되지 않음"}${data.lastSyncAt ? ` · 최근 동기화 ${esc(sourceDate(data.lastSyncAt))}` : ""}</small>${data.lastSyncError ? `<em>${esc(data.lastSyncError)}</em>` : ""}</div><button class="mmc-btn" data-action="sync" ${ownershipAllowsData() ? "" : "disabled"}>${SVG.sync}<span>다시 동기화</span></button></div>
+          ${data.lastSyncError ? `<div class="mmc-setting-card"><div><b>관리 World Info 충돌 해소</b><small>먼저 World Info를 내보내고 필요한 직접 편집을 보관함에 옮기세요. 확인 후 관리 항목만 다시 생성하며 비관리 항목은 보존합니다.</small></div><button class="mmc-btn" data-action="sync-overwrite" ${ownershipAllowsData() && !state.syncing ? "" : "disabled"}>보관함 기준으로 관리 항목 덮어쓰기</button></div>` : ""}
           <div class="mmc-setting-card"><div><b>기존 약속보관함 기록 가져오기</b><small>${legacy ? "이 RP에서 기존 promiseKeeperV1 데이터를 찾았어요. 원본은 그대로 두고 기억 보관함으로 복사해요." : "이 RP에서는 기존 약속보관함 데이터를 찾지 못했어요."}</small></div><button class="mmc-btn" data-action="import-legacy" ${legacy ? "" : "disabled"}>복사해 가져오기</button></div>
           <div class="mmc-setting-card"><div><b>요소 기억 · 이야기 위키 설정</b><small>추출·주입 지침과 모델은 각 기능의 설정에서 따로 정해요.</small></div><div class="mmc-inline-actions"><button class="mmc-btn" data-action="element-settings">요소 설정</button><button class="mmc-btn" data-action="wiki-settings">위키 설정</button></div></div>`)}
       </div>
@@ -7164,8 +7172,16 @@ When current and historical facts differ, current facts take precedence.`;
   function scopeBlocksApply(candidate) {
     return (safeArray(candidate?.scopeUnknown).length > 0 && candidate?.scopeConfirmed !== true) || (candidate?.scopeNeedsReview === true && candidate?.scopeConfirmed !== true && !normalizeKnownBy(candidate?.knownByIds).length);
   }
-  function markScopeReview(candidates, rows) {
-    const restricted = batchHasRestricted(rows);
+  function reviewContextHasRestricted() {
+    const restricted = (value) => {
+      if (!value || typeof value !== "object") return false;
+      if (normalizeKnownBy(value.knownBy).length) return true;
+      return Object.values(value).some(restricted);
+    };
+    return restricted([reviewMemorySnapshot(), threadList().filter((t) => t.status !== "cancelled").slice(-30), liveEpisodes().slice(-8)]);
+  }
+  function markScopeReview(candidates, rows, restrictedContext = false) {
+    const restricted = restrictedContext || batchHasRestricted(rows);
     if (!restricted) return false;
     for (const candidate of candidates) candidate.scopeNeedsReview = true;
     return true;
@@ -7320,6 +7336,7 @@ When current and historical facts differ, current facts take precedence.`;
     try {
       const sourceText = sourceToText(rows).slice(0, 100000);
       const snapshot = reviewMemorySnapshot();
+      const restrictedContext = reviewContextHasRestricted();
       const payload = await api("generate/raw", {
         method: "POST", timeoutMs: MODEL_TIMEOUT_MS,
         body: {
@@ -7340,7 +7357,7 @@ When current and historical facts differ, current facts take precedence.`;
       state.reviewEpisodeSelected = preselectEpisodes(state.reviewEpisodes);
       state.reviewThreads = extractThreadCandidates(rawRows, rows, "summaries");
       state.reviewThreadSelected = preselectThreads(state.reviewThreads);
-      markScopeReview(state.reviewCandidates, rows);
+      markScopeReview(state.reviewCandidates, rows, restrictedContext);
       state.reviewSelected = new Set(state.reviewCandidates.map((item, i) => item.action === "keep" || scopeBlocksApply(item) || item.duplicateOf ? null : String(i)).filter(Boolean));
       state.reviewSourceRows = rows.slice();
       await persistPendingReview();
@@ -7953,6 +7970,7 @@ When current and historical facts differ, current facts take precedence.`;
         }
         state.layer = null; state.candidates = []; state.candidateSelected.clear(); state.candEpisodes = []; state.candEpisodeSelected = new Set(); state.candThreads = []; state.candThreadSelected = new Set(); state.candBatch = null; render(); return;
       }
+      if (action === "sync-overwrite") { await overwriteManagedWorldInfo(); return; }
       if (action === "sync") { await syncLorebook({ silent: false }); try { await refreshAgentNotice(); render(); } catch {} return; }
       if (action === "import-legacy") { await importLegacy(); render(); return; }
       if (action === "reset-review-prompt") { const box = document.getElementById("mmc-review-prompt"); if (box) box.value = DEFAULT_REVIEW_PROMPT; return; }

@@ -145,7 +145,7 @@ export function createHost({ getContext, fetchImpl = globalThis.fetch, worldInfo
         transaction = { chatId, book: null };
     }
 
-    async function commitSync(chatId) {
+    async function commitSync(chatId, { overwriteManaged = false } = {}) {
         assertChat(chatId);
         if (transaction?.chatId !== chatId || !transaction.book) throw new Error('동기화할 로어북이 없습니다.');
         const book = clone(transaction.book);
@@ -156,15 +156,15 @@ export function createHost({ getContext, fetchImpl = globalThis.fetch, worldInfo
         const canonical = value => JSON.stringify(value, (_key, v) => v && typeof v === 'object' && !Array.isArray(v) ? Object.fromEntries(Object.entries(v).sort(([a], [b]) => a.localeCompare(b))) : v);
         if (previous && !baseline) {
             try { baseline = compileLegacyWorldInfo(previous, worldInfo.template).entries; }
-            catch { throw new Error('관리 World Info 직접 편집 충돌: 이전 구조화 책의 기준을 재구성할 수 없습니다. 원본을 보존했습니다.'); }
+            catch { if (!overwriteManaged) throw new Error('관리 World Info 직접 편집 충돌: 이전 구조화 책의 기준을 재구성할 수 없습니다. 원본을 보존했습니다.'); }
         }
         for (const key of Object.keys(baseline || {})) {
-            if (!existing.entries?.[key] || canonical(existing.entries[key]) !== canonical(baseline[key])) throw new Error('관리 World Info 직접 편집 충돌: 항목이 삭제되거나 변경되었습니다.');
+            if (!overwriteManaged && (!existing.entries?.[key] || canonical(existing.entries[key]) !== canonical(baseline[key]))) throw new Error('관리 World Info 직접 편집 충돌: 항목이 삭제되거나 변경되었습니다.');
         }
         for (const [key, entry] of Object.entries(existing?.entries || {})) {
-            if (entry.extensions?.[WORLD_KEY]) {
+            if (entry.extensions?.[WORLD_KEY] || (overwriteManaged && Object.hasOwn(baseline || {}, key))) {
                 const expected = baseline?.[key];
-                if (!expected || canonical(entry) !== canonical(expected)) throw new Error('관리 World Info 직접 편집 충돌: 변경 내용을 보관함에 반영한 뒤 다시 동기화해 주세요.');
+                if (!overwriteManaged && (!expected || canonical(entry) !== canonical(expected))) throw new Error('관리 World Info 직접 편집 충돌: 변경 내용을 보관함에 반영한 뒤 다시 동기화해 주세요.');
             } else {
                 let uid = Number(key);
                 while (Object.hasOwn(data.entries, uid)) uid++;

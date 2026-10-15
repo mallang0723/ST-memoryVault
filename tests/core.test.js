@@ -24,6 +24,67 @@ test('editing private history without scope change must not publish its state', 
         assert.equal(c.deriveThreadState(c.state.currentData.threads[0]).currentState, 'PUBLIC');
     } finally { globalThis.document = savedDocument; }
 });
+test('managed overwrite requires confirmation and never escalates a running sync', async () => {
+    const savedWindow = globalThis.window;
+    const calls = [];
+
+    // The helper is exercised separately from persistence, covered by host tests.
+    const d = core(['state', 'overwriteManagedWorldInfo'], { calls }, 'syncLorebook = async options => host.calls.push(options);');
+    d.state.currentChat = { id: 'c' }; d.state.currentData = {};
+    try {
+        globalThis.window = { confirm: () => false };
+        await d.overwriteManagedWorldInfo();
+        assert.equal(calls.length, 0);
+        globalThis.window.confirm = () => true;
+        await d.overwriteManagedWorldInfo();
+        assert.equal(calls[0].overwriteManaged, true);
+        d.state.syncPromise = Promise.resolve();
+        await assert.rejects(d.overwriteManagedWorldInfo(), /동기화/);
+        assert.equal(calls.length, 1);
+    } finally { globalThis.window = savedWindow; }
+});
+
+test('auto apply downgrades a restricted snapshot even when the model proposes public copies', async () => {
+    for (const knownBy of [undefined, ['all'], ['Alice']]) {
+        const savedDocument = globalThis.document;
+        globalThis.document = { getElementById: () => null };
+        let applied = 0;
+        const c = core(['state', 'normalizeData', 'maybeAutoProcessSummaries', 'restorePendingReview', 'scopeBlocksApply'], {
+            api: async () => ({ content: JSON.stringify([{ action: 'add', type: 'anchor', title: 'copy', content: 'SECRET', knownBy }]) }),
+            onApply: () => { applied++; },
+        }, 'ownershipAllowsData = () => true; advancedMemoryEnabled = () => false; chooseDefaultConnection = () => "fake"; saveUiState = async () => {}; setBusy = () => {}; render = () => {}; toast = () => {}; persistData = async d => { state.currentData = d; }; applyReviewCandidates = async () => host.onApply();');
+        try {
+            c.state.chatCharacters = [{ id: 'a', name: 'Alice' }];
+            c.state.currentData = c.normalizeData({ items: [{ id: 'secret', type: 'anchor', title: 'private', content: 'SECRET', knownBy: ['a'] }] });
+            assert.deepEqual(c.state.currentData.items[0].knownBy, ['a']);
+            c.state.currentChat = { id: 'c', metadata: {} }; c.state.selectedChatId = 'c';
+            c.state.summaryUpdateMode = 'auto_apply'; c.state.connections = [{ id: 'fake' }];
+            c.state.pendingSummaryRows = [{ id: 's', content: 'public summary' }];
+            await c.maybeAutoProcessSummaries();
+            assert.equal(applied, 0);
+            assert.equal(c.state.currentData.items.length, 1);
+            assert.equal(c.state.currentData.pendingReview.candidates.length, 1);
+            c.restorePendingReview();
+            assert.equal(c.state.reviewCandidates[0].scopeNeedsReview, true);
+            if (knownBy?.[0] !== 'Alice') assert.equal(c.scopeBlocksApply(c.state.reviewCandidates[0]), true);
+        } finally { globalThis.document = savedDocument; }
+    }
+});
+
+test('review context restriction includes nested episode and thread scopes but not public memory', () => {
+    const c = core(['state', 'normalizeData', 'reviewContextHasRestricted']);
+    c.state.chatCharacters = [{ id: 'a', name: 'Alice' }];
+    for (const data of [
+        { threads: [threadFixture] },
+        { episodes: [{ title: 'scene', event: { summary: 'secret', knownBy: ['a'] } }] },
+    ]) {
+        c.state.currentData = c.normalizeData({ items: [], ...data });
+        assert.equal(c.reviewContextHasRestricted(), true);
+    }
+    c.state.currentData = c.normalizeData({ items: [{ type: 'anchor', title: 'public', content: 'public' }] });
+    assert.equal(c.reviewContextHasRestricted(), false);
+});
+
 test('empty public history must not fall back to latest private thread state', () => {
     const c = core(['normalizeThread', 'deriveThreadState']);
     const thread = c.normalizeThread({ title: 'thread', currentState: 'SECRET', history: [{ state: '', status: 'hold', at: '2026-01-01' }, { state: 'SECRET', knownBy: ['a'], at: '2026-02-01' }] });
