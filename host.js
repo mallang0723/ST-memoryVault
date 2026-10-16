@@ -4,6 +4,8 @@ import { WORLD_KEY, compileWorldInfo, compileLegacyWorldInfo, removeManagedEntri
 export const HOST_KEY = 'memoryVaultHost';
 export const SETTINGS_KEY = 'memoryVault';
 const clone = value => value === undefined ? undefined : structuredClone(value);
+const canonical = value => JSON.stringify(value, (_key, v) => v && typeof v === 'object' && !Array.isArray(v) ? Object.fromEntries(Object.entries(v).sort(([a], [b]) => a.localeCompare(b))) : v);
+const isLegacyName = name => /^MemoryVault_[a-f0-9]{32}$/.test(name);
 function characterScope(ctx) {
     const group = (ctx.groups || []).find(g => String(g.id) === String(ctx.groupId));
     const characters = ctx.groupId ? (ctx.characters || []).filter(c => group?.members?.includes(c.avatar)) : [ctx.characters?.[ctx.characterId]].filter(Boolean);
@@ -59,6 +61,7 @@ export function chatSnapshot(ctx) {
 
 export function createHost({ getContext, fetchImpl = globalThis.fetch, worldInfo = {}, reportError = console.error, isGenerating = () => false, hashString }) {
     const cache = new Map();
+    const files = new Map(); // Stable internal book ID -> current physical WI filename.
     const listeners = new Set();
     const cleanup = [];
     let transaction = null;
@@ -89,18 +92,101 @@ export function createHost({ getContext, fetchImpl = globalThis.fetch, worldInfo
         const hash = hashString ? await hashString(chatId) : Array.from(new Uint8Array(
             await crypto.subtle.digest('SHA-256', new TextEncoder().encode(chatId)),
         ), n => n.toString(16).padStart(2, '0')).join('');
-        return `MemoryVault_${hash.slice(0, 32)}`;
+        const ctx = assertChat(chatId);
+        const group = (ctx.groups || []).find(g => String(g.id) === String(ctx.groupId));
+        const clean = value => String(value || '').normalize('NFC').replace(/[\/\\:*?"<>|\x00-\x1f\x7f]/g, ' ').replace(/\s+/g, ' ').trim().replace(/[. ]+$/, '');
+        const truncate = (value, bytes) => {
+            let result = '';
+            for (const char of value) {
+                if (new TextEncoder().encode(result + char).length > bytes) break;
+                result += char;
+            }
+            return result.trim();
+        };
+        const who = truncate(clean(ctx.groupId ? group?.name || '그룹' : ctx.characters?.[ctx.characterId]?.name || ctx.characters?.[ctx.characterId]?.avatar?.replace(/\.[^.]+$/, '') || '캐릭터'), 72);
+        const chat = truncate(clean(ctx.chatId) || '채팅', 100);
+        const rows = await post('/api/worldinfo/list', {});
+        const names = new Set(rows.map(row => row.file_id.toLocaleLowerCase().normalize('NFC')));
+        for (let length = 6; length <= hash.length; length += 2) {
+            const prefix = `기억보관함 - ${who || '캐릭터'} - `;
+            const suffix = ` (${hash.slice(0, length)})`;
+            const name = prefix + truncate(chat, 235 - new TextEncoder().encode(prefix + suffix).length) + suffix;
+            if (!names.has(name.toLocaleLowerCase().normalize('NFC'))) return name;
+        }
+        throw new Error('로어북 이름 충돌을 해결하지 못했습니다. 기존 책을 보존했습니다.');
+    }
+
+    async function managedRows() {
+        const rows = await post('/api/worldinfo/list', {});
+        return rows.filter(row => row.extensions?.[WORLD_KEY]?.id && row.extensions[WORLD_KEY].chatId);
+    }
+
+    function uniqueRow(rows) {
+        if (rows.length <= 1) return rows[0];
+        // A verified copy may remain after interrupted relinking/deletion. Only
+        // that legacy/copy pair is recoverable; never pick arbitrary duplicates.
+        const legacy = rows.filter(row => isLegacyName(row.file_id));
+        if (rows.length === 2 && legacy.length === 1 && rows[0].extensions[WORLD_KEY].id === rows[1].extensions[WORLD_KEY].id) return legacy[0];
+        throw new Error('같은 채팅의 관리 로어북이 여러 개입니다. 원본을 보존했습니다.');
     }
 
     async function readBook(id, committedOnly = false) {
-        if (!/^MemoryVault_[a-f0-9]{32}$/.test(id || '')) return null;
+        if (typeof id !== 'string' || !id) return null;
         if (!committedOnly && transaction?.book?.id === id) return clone(transaction.book);
-        if (cache.has(id)) return clone(cache.get(id));
-        const data = await post('/api/worldinfo/get', { name: id });
+        const row = uniqueRow((await managedRows()).filter(row => row.extensions[WORLD_KEY].id === id));
+        if (!row) return null;
+        files.set(id, row.file_id);
+        const data = await post('/api/worldinfo/get', { name: row.file_id });
         const book = data?.extensions?.[WORLD_KEY];
-        if (!book || book.id !== id) return null;
+        if (!book || book.id !== id || book.chatId !== row.extensions[WORLD_KEY].chatId) return null;
         cache.set(id, clone(book));
         return clone(book);
+    }
+
+    async function relocateLegacy(chatId) {
+        const rows = (await managedRows()).filter(row => row.extensions[WORLD_KEY].chatId === chatId);
+        const row = uniqueRow(rows);
+        if (!row || !isLegacyName(row.file_id)) return;
+        const oldName = row.file_id;
+        const original = await post('/api/worldinfo/get', { name: oldName });
+        if (canonical(original.extensions?.[WORLD_KEY]) !== canonical(row.extensions[WORLD_KEY])) throw new Error('이전 중 책이 변경되었습니다. 다시 동기화해 주세요.');
+        const copy = rows.find(other => other !== row);
+        const newName = copy?.file_id || await bookName(chatId);
+        // Keep the internal ID and all entries/extension data byte-equivalent as
+        // JSON values. Names are presentation; metadata IDs never need rewriting.
+        const moved = { ...clone(original), name: newName };
+        if (copy) {
+            const saved = await post('/api/worldinfo/get', { name: newName });
+            if (canonical(saved) !== canonical(moved)) throw new Error('이전 사본이 원본과 다릅니다. 두 책 모두 보존했습니다.');
+        } else {
+            await post('/api/worldinfo/edit', { name: newName, data: moved });
+        }
+        const saved = await post('/api/worldinfo/get', { name: newName });
+        if (canonical(saved) !== canonical(moved)) throw new Error('새 로어북 저장 검증에 실패했습니다. 옛 책을 보존했습니다.');
+        assertChat(chatId);
+        // Relinking must persist and verify before deleting the only old name.
+        if (!worldInfo.retargetLinks) throw new Error('로어북 연결 이전 기능이 없어 옛 책을 보존했습니다.');
+        await worldInfo.retargetLinks(oldName, newName);
+        const ctx = assertChat(chatId);
+        if (ctx.chatMetadata.world_info === oldName) {
+            const target = ctx.chatMetadata;
+            target.world_info = newName;
+            try {
+                await saveMetadata(chatId, {});
+                const rows = await post(ctx.groupId ? '/api/chats/group/get' : '/api/chats/get', ctx.groupId ? { id: ctx.chatId } : { file_name: ctx.chatId, avatar_url: ctx.characters[ctx.characterId].avatar });
+                if (rows?.[0]?.chat_metadata?.world_info !== newName) throw new Error('채팅 로어북 연결 저장을 확인하지 못했습니다.');
+            } catch (error) { if (target.world_info === newName) target.world_info = oldName; throw error; }
+        }
+        assertChat(chatId);
+        const current = await post('/api/worldinfo/get', { name: oldName });
+        if (canonical(current) !== canonical(original)) throw new Error('이전 중 원본이 변경되어 옛 책을 보존했습니다.');
+        if (canonical(await post('/api/worldinfo/get', { name: newName })) !== canonical(moved)) throw new Error('이전 중 새 책이 변경되어 옛 책을 보존했습니다.');
+        assertChat(chatId);
+        await post('/api/worldinfo/delete', { name: oldName });
+        files.set(original.extensions[WORLD_KEY].id, newName);
+        cache.delete(original.extensions[WORLD_KEY].id);
+        worldInfo.cache?.delete(oldName);
+        try { await worldInfo.updateList?.(); } catch (error) { console.warn('[Memory Vault] World Info list refresh', error); }
     }
 
     async function saveMetadata(chatId, patch) {
@@ -143,6 +229,10 @@ export function createHost({ getContext, fetchImpl = globalThis.fetch, worldInfo
         assertChat(chatId);
         if (transaction) throw new Error('로어북 동기화가 이미 진행 중입니다.');
         transaction = { chatId, book: null };
+        try {
+            await relocateLegacy(chatId);
+            assertChat(chatId);
+        } catch (error) { transaction = null; throw error; }
     }
 
     async function commitSync(chatId, { overwriteManaged = false } = {}) {
@@ -150,10 +240,16 @@ export function createHost({ getContext, fetchImpl = globalThis.fetch, worldInfo
         if (transaction?.chatId !== chatId || !transaction.book) throw new Error('동기화할 로어북이 없습니다.');
         const book = clone(transaction.book);
         const data = compileWorldInfo(book, worldInfo.template, characterScope(getContext()));
-        const existing = await post('/api/worldinfo/get', { name: book.id });
+        const filename = files.get(book.id) || book.id;
+        data.name = filename;
+        const existing = await post('/api/worldinfo/get', { name: filename });
         const previous = existing?.extensions?.[WORLD_KEY];
+        if (transaction.created ? (await post('/api/worldinfo/list', {})).some(row => row.file_id === filename)
+            : !previous || previous.id !== book.id || previous.chatId !== chatId) {
+            throw new Error('로어북 이름/소유 충돌: 기존 책을 보존했습니다. 다시 동기화해 주세요.');
+        }
         let baseline = existing?.extensions?.memoryVaultBaseline;
-        const canonical = value => JSON.stringify(value, (_key, v) => v && typeof v === 'object' && !Array.isArray(v) ? Object.fromEntries(Object.entries(v).sort(([a], [b]) => a.localeCompare(b))) : v);
+
         if (previous && !baseline) {
             try { baseline = compileLegacyWorldInfo(previous, worldInfo.template).entries; }
             catch { if (!overwriteManaged) throw new Error('관리 World Info 직접 편집 충돌: 이전 구조화 책의 기준을 재구성할 수 없습니다. 원본을 보존했습니다.'); }
@@ -172,10 +268,10 @@ export function createHost({ getContext, fetchImpl = globalThis.fetch, worldInfo
             }
         }
         data.extensions = { ...clone(existing?.extensions || {}), ...data.extensions, memoryVaultBaseline: clone(Object.fromEntries(Object.entries(data.entries).filter(([, entry]) => entry.extensions?.[WORLD_KEY]))) };
-        await post('/api/worldinfo/edit', { name: book.id, data: { ...clone(existing || {}), ...data } });
+        await post('/api/worldinfo/edit', { name: filename, data: { ...clone(existing || {}), ...data } });
         cache.set(book.id, clone(book));
-        worldInfo.cache?.set(book.id, clone(data));
-        await getContext().eventSource.emit(getContext().eventTypes.WORLDINFO_UPDATED, book.id, clone(data));
+        worldInfo.cache?.set(filename, clone(data));
+        await getContext().eventSource.emit(getContext().eventTypes.WORLDINFO_UPDATED, filename, clone(data));
         // Refresh the editor list; this is presentation, not part of persistence.
         try { await worldInfo.updateList?.(); } catch (error) { console.warn('[Memory Vault] World Info list refresh', error); }
         assertChat(chatId);
@@ -246,7 +342,8 @@ export function createHost({ getContext, fetchImpl = globalThis.fetch, worldInfo
             if (parts.length === 1 && method === 'GET') {
                 const chatId = url.searchParams.get('chatId');
                 assertChat(chatId);
-                const book = await readBook(await bookName(chatId));
+                const row = uniqueRow((await managedRows()).filter(row => row.extensions[WORLD_KEY].chatId === chatId));
+                const book = row ? await readBook(row.extensions[WORLD_KEY].id) : null;
                 assertChat(chatId);
                 return book ? [book] : [];
             }
@@ -254,7 +351,9 @@ export function createHost({ getContext, fetchImpl = globalThis.fetch, worldInfo
                 assertChat(body.chatId);
                 if (transaction?.chatId !== body.chatId) throw new Error('로어북 생성은 동기화 안에서만 허용됩니다.');
                 const id = await bookName(body.chatId);
-                const book = { ...clone(body), id, entries: {} };
+                const book = { ...clone(body), id, name: id, entries: {} };
+                files.set(id, id);
+                transaction.created = true;
                 transaction.book = book;
                 return clone(book);
             }
@@ -264,7 +363,7 @@ export function createHost({ getContext, fetchImpl = globalThis.fetch, worldInfo
             assertChat(book.chatId);
             if (transaction?.chatId !== book.chatId) throw new Error('다른 채팅의 로어북은 수정할 수 없습니다.');
             if (parts.length === 2 && method === 'PATCH') {
-                transaction.book = { ...book, ...clone(body), id: book.id, entries: book.entries };
+                transaction.book = { ...book, ...clone(body), id: book.id, name: book.name, chatId: book.chatId, entries: book.entries };
                 return clone(transaction.book);
             }
             if (parts[2] === 'entries') {
@@ -300,7 +399,7 @@ export function createHost({ getContext, fetchImpl = globalThis.fetch, worldInfo
             const responder = ctx.characters?.[ctx.characterId]?.avatar?.replace(/\.[^.]+$/, '');
             lists.chatLore.push(...Object.values(compiled.entries).filter(entry => !entry.disable)
                 .filter(entry => !entry.characterFilter.names.length || entry.characterFilter.names.includes(responder))
-                .map(entry => ({ ...entry, world: book.id })));
+                .map(entry => ({ ...entry, world: files.get(book.id) || book.id })));
         } catch (error) { reportError(error); }
     }
 

@@ -1,7 +1,9 @@
 import { getContext } from '../../../st-context.js';
-import { isGenerating } from '../../../../script.js';
+import { isGenerating, saveSettings } from '../../../../script.js';
 import { sha256 } from '../../../../lib.js';
-import { newWorldInfoEntryTemplate, worldInfoCache, updateWorldInfoList } from '../../../world-info.js';
+import { newWorldInfoEntryTemplate, worldInfoCache, updateWorldInfoList, world_info, selected_world_info } from '../../../world-info.js';
+import { power_user } from '../../../power-user.js';
+import { retargetWorldInfoLinks } from './links.js';
 import { createHost } from './host.js';
 import { mountMemoryVault } from './extension.js';
 
@@ -13,7 +15,17 @@ function reportError(error) {
 try {
     const host = createHost({
         getContext, reportError, isGenerating, hashString: sha256,
-        worldInfo: { template: newWorldInfoEntryTemplate, cache: worldInfoCache, updateList: updateWorldInfoList },
+        worldInfo: {
+            template: newWorldInfoEntryTemplate, cache: worldInfoCache, updateList: updateWorldInfoList,
+            retargetLinks: (oldName, newName) => retargetWorldInfoLinks(oldName, newName, {
+                getContext, state: world_info, selected: selected_world_info, powerUser: power_user, saveSettings,
+                post: async (path, body) => {
+                    const response = await fetch(path, { method: 'POST', headers: getContext().getRequestHeaders(), body: JSON.stringify(body), signal: AbortSignal.timeout(30000) });
+                    if (!response.ok) throw new Error(`로어북 연결 이전 실패 (${response.status})`);
+                    return response.json();
+                },
+            }),
+        },
     });
     host.start();
     const vault = mountMemoryVault(host);

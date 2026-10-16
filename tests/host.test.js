@@ -49,21 +49,139 @@ function fixture(options = {}) {
         async generateRaw(params) { calls.push(params); return '{"items":[]}'; },
     };
     let failWorld = false;
+    const faults = {};
     const host = createHost({ ...options, getContext: () => ctx, fetchImpl: async (path, options) => {
         const body = JSON.parse(options.body);
         calls.push({ path, body, headers: options.headers });
         if (path === '/api/worldinfo/edit') {
-            if (failWorld) return new Response('failed', { status: 500 });
-            disk.set(body.name, structuredClone(body.data));
+            if (failWorld || faults.save) return new Response('failed', { status: 500 });
+            disk.set(body.name, faults.verify ? { entries: {} } : structuredClone(body.data));
             return Response.json({ ok: true });
         }
         if (path === '/api/worldinfo/get') return Response.json(disk.get(body.name) || { entries: {} });
+        if (path === '/api/worldinfo/list') return Response.json([...disk].filter(([name]) => name !== 'chat').map(([file_id, data]) => ({ file_id, extensions: data.extensions || {} })));
+        if (path === '/api/worldinfo/delete') {
+            if (faults.delete) return new Response('failed', { status: 500 });
+            disk.delete(body.name); return new Response('OK');
+        }
         if (path.endsWith('/get')) return Response.json(disk.get('chat') || []);
         throw new Error(path);
     } });
     const id = chatIdentity(ctx);
-    return { ctx, host, id, disk, calls, failWorld: () => { failWorld = true; } };
+    return { ctx, host, id, disk, calls, faults, failWorld: () => { failWorld = true; } };
 }
+test('new book names are readable, filename-safe and bounded in UTF-8 bytes', async () => {
+    const f = fixture();
+    f.ctx.characters[0].name = '한글 / 캐릭터:*?"<>|\\';
+    f.ctx.chatId = '긴 채팅 '.repeat(100);
+    const id = await seed(f);
+    assert.match(id, /^기억보관함 - 한글 캐릭터 - 긴 채팅/);
+    assert.match(id, /\([a-f0-9]{6}\)$/);
+    assert.ok(!/[\/\\:*?"<>|\x00-\x1f]/.test(id));
+    assert.ok(Buffer.byteLength(id + '.json') <= 240);
+});
+test('marker discovery survives display/file renames and ignores unrelated files', async () => {
+    const f = fixture();
+    const id = await seed(f);
+    const before = f.disk.get(id);
+    f.disk.set('사용자가 고친 이름', before);
+    f.disk.delete(id);
+    f.disk.set('unrelated', { entries: {} });
+    f.ctx.characters[0].name = '새 캐릭터명';
+    f.ctx.chatId = 'renamed';
+    const books = await f.host.api(`lorebooks?chatId=${encodeURIComponent(f.id)}`);
+    assert.equal(books.length, 1);
+    assert.equal(books[0].id, id);
+    await f.host.beginSync(f.id);
+    await f.host.api(`lorebooks/${encodeURIComponent(id)}`, { method: 'PATCH', body: { name: 'new display' } });
+    await f.host.commitSync(f.id);
+    assert.equal(f.disk.has(id), false);
+    assert.equal(f.disk.get('사용자가 고친 이름').extensions.memoryVault.chatId, f.id);
+});
+test('legacy relocation verifies a lossless copy before links and deletion; failures preserve source', async () => {
+    for (const failure of ['', 'save', 'verify', 'links', 'delete', 'target-changed', 'metadata']) {
+        const order = [];
+        const f = fixture({ worldInfo: { async retargetLinks(oldName, newName) {
+            order.push('links');
+            assert.ok(f.disk.has(oldName));
+            assert.ok(f.disk.has(newName));
+            if (failure === 'links') throw Error('link failed');
+            if (failure === 'target-changed') f.disk.get(newName).custom = { changed: true };
+        } } });
+        const id = await seed(f);
+        const old = 'MemoryVault_12345678901234567890123456789012';
+        const data = structuredClone(f.disk.get(id));
+        data.extensions.memoryVault.id = old;
+        data.extensions.external = { untouched: ['한글', 42] };
+        data.entries[88] = { uid: 88, content: '직접 수정 보존', custom: true };
+        data.custom = { kept: true };
+        f.disk.delete(id);
+        f.disk.set(old, data);
+        f.ctx.chatMetadata.memoryCabinetV1.lorebookId = old;
+        f.ctx.chatMetadata.world_info = old;
+        f.faults.save = failure === 'save';
+        f.faults.verify = failure === 'verify';
+        f.faults.delete = failure === 'delete';
+        if (failure === 'metadata') f.ctx.saveMetadata = async () => {};
+        if (failure) {
+            await assert.rejects(f.host.beginSync(f.id));
+            assert.deepEqual(f.disk.get(old), data);
+        } else {
+            await f.host.beginSync(f.id);
+            assert.equal(f.disk.has(old), false);
+            const target = [...f.disk.keys()].find(key => key.startsWith('기억보관함'));
+            const moved = f.disk.get(target);
+            assert.deepEqual({ ...moved, name: data.name }, data);
+            assert.equal(f.ctx.chatMetadata.world_info, target);
+            assert.equal(f.ctx.chatMetadata.memoryCabinetV1.lorebookId, old, 'logical ID is stable');
+            assert.deepEqual(order, ['links']);
+            assert.equal((await f.host.api(`lorebooks/${old}`)).id, old);
+        }
+    }
+});
+test('interrupted relocation reuses one identical copy on retry and preserves logical ID', async () => {
+    let fail = true;
+    const f = fixture({ worldInfo: { retargetLinks: async () => { if (fail) throw Error('offline'); } } });
+    const id = await seed(f);
+    const old = 'MemoryVault_12345678901234567890123456789012';
+    const data = structuredClone(f.disk.get(id));
+    data.extensions.memoryVault.id = old;
+    f.disk.delete(id); f.disk.set(old, data);
+    await assert.rejects(f.host.beginSync(f.id), /offline/);
+    const copyName = [...f.disk.keys()].find(name => name.startsWith('기억보관함'));
+    fail = false;
+    await f.host.beginSync(f.id);
+    assert.equal(f.disk.has(old), false);
+    assert.equal([...f.disk.keys()].filter(name => name.startsWith('기억보관함')).length, 1);
+    assert.equal(f.disk.get(copyName).extensions.memoryVault.id, old);
+});
+test('group names use group title and collision suffix grows without overwriting a foreign book', async () => {
+    const f = fixture({ hashString: async () => 'abcdef12' + '0'.repeat(56) });
+    f.ctx.groupId = 'g';
+    f.ctx.groups = [{ id: 'g', name: '한글 그룹', members: [] }];
+    f.id = chatIdentity(f.ctx);
+    const collision = '기억보관함 - 한글 그룹 - story (abcdef)';
+    f.disk.set(collision, { entries: { 0: { content: 'user world' } } });
+    const id = await seed(f);
+    assert.equal(id, '기억보관함 - 한글 그룹 - story (abcdef12)');
+    assert.equal(f.disk.get(collision).entries[0].content, 'user world');
+});
+test('sync acquisition rejects simultaneous begin calls while discovery is pending', async () => {
+    const f = fixture();
+    const first = f.host.beginSync(f.id);
+    await assert.rejects(f.host.beginSync(f.id), /진행 중/);
+    await first;
+    f.host.endSync();
+});
+test('a name claimed after allocation is never overwritten by commit', async () => {
+    const f = fixture();
+    await f.host.beginSync(f.id);
+    const book = await f.host.api('lorebooks', { method: 'POST', body: { chatId: f.id } });
+    const foreign = { entries: {}, extensions: { external: true } };
+    f.disk.set(book.id, foreign);
+    await assert.rejects(f.host.commitSync(f.id), /충돌/);
+    assert.deepEqual(f.disk.get(book.id), foreign);
+});
 test('LAN metadata and branch boundary use supplied hash', async () => {
     const original = globalThis.crypto;
     Object.defineProperty(globalThis, 'crypto', { configurable: true, value: {} });

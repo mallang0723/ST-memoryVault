@@ -1,11 +1,11 @@
 {
   "name": "memory-vault-sillytavern",
-  "version": "2.1.1-st.1",
+  "version": "2.1.1-st.2",
   "private": true,
   "type": "module",
   "scripts": {
     "test": "node --test --test-isolation=none tests/*.test.js",
-    "check": "node --check index.js && node --check host.js && node --check world-info.js && node --check migration.js && node --check extension.js",
+    "check": "node --check index.js && node --check host.js && node --check links.js && node --check world-info.js && node --check migration.js && node --check extension.js",
     "test:browser": "node tests/browser.mjs",
     "package": "python3 scripts/package.py"
   },
