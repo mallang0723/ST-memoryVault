@@ -86,13 +86,8 @@ export function createHost({ getContext, fetchImpl = globalThis.fetch, worldInfo
         return type.includes('json') ? response.json() : null;
     }
 
-    async function bookName(chatId) {
-        // ST's bundled SHA-256 also works on LAN HTTP, where Web Crypto's
-        // subtle API is unavailable. The fallback is for non-browser hosts/tests.
-        const hash = hashString ? await hashString(chatId) : Array.from(new Uint8Array(
-            await crypto.subtle.digest('SHA-256', new TextEncoder().encode(chatId)),
-        ), n => n.toString(16).padStart(2, '0')).join('');
-        const ctx = assertChat(chatId);
+    function formatBookName(tail, compact = true) {
+        const ctx = getContext();
         const group = (ctx.groups || []).find(g => String(g.id) === String(ctx.groupId));
         const clean = value => String(value || '').normalize('NFC').replace(/[\/\\:*?"<>|\x00-\x1f\x7f]/g, ' ').replace(/\s+/g, ' ').trim().replace(/[. ]+$/, '');
         const truncate = (value, bytes) => {
@@ -104,13 +99,31 @@ export function createHost({ getContext, fetchImpl = globalThis.fetch, worldInfo
             return result.trim();
         };
         const who = truncate(clean(ctx.groupId ? group?.name || '그룹' : ctx.characters?.[ctx.characterId]?.name || ctx.characters?.[ctx.characterId]?.avatar?.replace(/\.[^.]+$/, '') || '캐릭터'), 72);
-        const chat = truncate(clean(ctx.chatId) || '채팅', 100);
+        let label = clean(ctx.chatId);
+        if (compact) {
+            const fullWho = clean(ctx.groupId ? group?.name : ctx.characters?.[ctx.characterId]?.name);
+            const hasPrefix = fullWho && label.startsWith(`${fullWho} - `);
+            if (hasPrefix) label = label.slice(fullWho.length + 3);
+            const date = hasPrefix && label.match(/^(\d{4})-(\d{1,2})-(\d{1,2}) @\d{1,2}h \d{1,2}m \d{1,2}s \d{1,3}ms$/);
+            if (date) label = `${date[1]}-${date[2].padStart(2, '0')}-${date[3].padStart(2, '0')}`;
+        }
+        const chat = truncate(label || '채팅', 100);
+        const prefix = `기억보관함 - ${who || '캐릭터'} - `;
+        const suffix = ` (${tail})`;
+        return prefix + truncate(chat, 235 - new TextEncoder().encode(prefix + suffix).length) + suffix;
+    }
+
+    async function bookName(chatId) {
+        // ST's bundled SHA-256 also works on LAN HTTP, where Web Crypto's
+        // subtle API is unavailable. The fallback is for non-browser hosts/tests.
+        const hash = hashString ? await hashString(chatId) : Array.from(new Uint8Array(
+            await crypto.subtle.digest('SHA-256', new TextEncoder().encode(chatId)),
+        ), n => n.toString(16).padStart(2, '0')).join('');
+        assertChat(chatId);
         const rows = await post('/api/worldinfo/list', {});
         const names = new Set(rows.map(row => row.file_id.toLocaleLowerCase().normalize('NFC')));
         for (let length = 6; length <= hash.length; length += 2) {
-            const prefix = `기억보관함 - ${who || '캐릭터'} - `;
-            const suffix = ` (${hash.slice(0, length)})`;
-            const name = prefix + truncate(chat, 235 - new TextEncoder().encode(prefix + suffix).length) + suffix;
+            const name = formatBookName(hash.slice(0, length));
             if (!names.has(name.toLocaleLowerCase().normalize('NFC'))) return name;
         }
         throw new Error('로어북 이름 충돌을 해결하지 못했습니다. 기존 책을 보존했습니다.');
@@ -121,11 +134,18 @@ export function createHost({ getContext, fetchImpl = globalThis.fetch, worldInfo
         return rows.filter(row => row.extensions?.[WORLD_KEY]?.id && row.extensions[WORLD_KEY].chatId);
     }
 
+    function needsRelocation(name) {
+        if (isLegacyName(name)) return true;
+        const tail = name.match(/ \(([a-f0-9]{6,64})\)$/)?.[1];
+        // Only recognize our exact previous formatter, never a user-renamed book.
+        return !!tail && name === formatBookName(tail, false) && name !== formatBookName(tail);
+    }
+
     function uniqueRow(rows) {
         if (rows.length <= 1) return rows[0];
         // A verified copy may remain after interrupted relinking/deletion. Only
         // that legacy/copy pair is recoverable; never pick arbitrary duplicates.
-        const legacy = rows.filter(row => isLegacyName(row.file_id));
+        const legacy = rows.filter(row => needsRelocation(row.file_id));
         if (rows.length === 2 && legacy.length === 1 && rows[0].extensions[WORLD_KEY].id === rows[1].extensions[WORLD_KEY].id) return legacy[0];
         throw new Error('같은 채팅의 관리 로어북이 여러 개입니다. 원본을 보존했습니다.');
     }
@@ -146,7 +166,7 @@ export function createHost({ getContext, fetchImpl = globalThis.fetch, worldInfo
     async function relocateLegacy(chatId) {
         const rows = (await managedRows()).filter(row => row.extensions[WORLD_KEY].chatId === chatId);
         const row = uniqueRow(rows);
-        if (!row || !isLegacyName(row.file_id)) return;
+        if (!row || !needsRelocation(row.file_id)) return;
         const oldName = row.file_id;
         const original = await post('/api/worldinfo/get', { name: oldName });
         if (canonical(original.extensions?.[WORLD_KEY]) !== canonical(row.extensions[WORLD_KEY])) throw new Error('이전 중 책이 변경되었습니다. 다시 동기화해 주세요.');

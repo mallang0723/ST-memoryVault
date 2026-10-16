@@ -80,6 +80,26 @@ test('new book names are readable, filename-safe and bounded in UTF-8 bytes', as
     assert.ok(!/[\/\\:*?"<>|\x00-\x1f]/.test(id));
     assert.ok(Buffer.byteLength(id + '.json') <= 240);
 });
+test('ST default chat filenames become date-only labels without changing the chat', async () => {
+    const f = fixture({ hashString: async () => '68fd4a' + '0'.repeat(58) });
+    f.ctx.characters[0].name = 'Seraphina';
+    f.ctx.chatId = 'Seraphina - 2023-5-12 @21h 32m 29s 224ms';
+    assert.equal(await seed(f), '기억보관함 - Seraphina - 2023-05-12 (68fd4a)');
+    assert.equal(f.ctx.chatId, 'Seraphina - 2023-5-12 @21h 32m 29s 224ms');
+});
+test('custom chat labels stay intact except for one leading duplicate character name', async () => {
+    for (const [chat, label] of [
+        ['Seraphina - 우리들의 첫날', '우리들의 첫날'],
+        ['우리들의 첫날 - Seraphina', '우리들의 첫날 - Seraphina'],
+        ['2023-5-12 @21h 32m 29s 224ms', '2023-5-12 @21h 32m 29s 224ms'],
+        ['Seraphina - 2023-5-12 @21h 32m 29s 224ms 후일담', '2023-5-12 @21h 32m 29s 224ms 후일담'],
+    ]) {
+        const f = fixture({ hashString: async () => '68fd4a' + '0'.repeat(58) });
+        f.ctx.characters[0].name = 'Seraphina';
+        f.ctx.chatId = chat;
+        assert.equal(await seed(f), `기억보관함 - Seraphina - ${label} (68fd4a)`);
+    }
+});
 test('marker discovery survives display/file renames and ignores unrelated files', async () => {
     const f = fixture();
     const id = await seed(f);
@@ -154,6 +174,45 @@ test('interrupted relocation reuses one identical copy on retry and preserves lo
     assert.equal(f.disk.has(old), false);
     assert.equal([...f.disk.keys()].filter(name => name.startsWith('기억보관함')).length, 1);
     assert.equal(f.disk.get(copyName).extensions.memoryVault.id, old);
+});
+test('st.2 long-name relocation is lossless, retryable and never deletes an unverified source', async () => {
+    for (const failure of ['', 'save', 'verify', 'links', 'delete']) {
+        let failLinks = failure === 'links';
+        const f = fixture({ hashString: async () => '68fd4a' + '0'.repeat(58), worldInfo: {
+            async retargetLinks(oldName, newName) {
+                assert.ok(f.disk.has(oldName));
+                assert.deepEqual(f.disk.get(newName), { ...f.disk.get(oldName), name: newName });
+                if (failLinks) throw Error('offline');
+            },
+        } });
+        f.ctx.characters[0].name = 'Seraphina';
+        f.ctx.chatId = 'Seraphina - 2023-5-12 @21h 32m 29s 224ms';
+        const id = await seed(f);
+        const old = '기억보관함 - Seraphina - Seraphina - 2023-5-12 @21h 32m 29s 224ms (68fd4a)';
+        const data = structuredClone(f.disk.get(id));
+        data.name = old;
+        data.extensions.external = { kept: true };
+        data.entries[99] = { uid: 99, content: 'external entry' };
+        f.disk.delete(id); f.disk.set(old, data);
+        f.ctx.chatMetadata.world_info = old;
+        f.faults[failure] = true;
+        if (failure) {
+            await assert.rejects(f.host.beginSync(f.id));
+            assert.deepEqual(f.disk.get(old), data);
+            if (failure === 'verify') continue; // A corrupted copy must remain blocked, not silently reused.
+            f.faults[failure] = false;
+            failLinks = false;
+        }
+        await f.host.beginSync(f.id);
+        f.host.endSync();
+        assert.equal(f.disk.has(old), false);
+        assert.deepEqual(f.disk.get(id), { ...data, name: id });
+        assert.equal(f.ctx.chatMetadata.world_info, id);
+        assert.equal(f.ctx.chatMetadata.memoryCabinetV1.lorebookId, id);
+        await f.host.beginSync(f.id);
+        f.host.endSync();
+        assert.equal([...f.disk.keys()].filter(n => n.startsWith('기억보관함')).length, 1);
+    }
 });
 test('group names use group title and collision suffix grows without overwriting a foreign book', async () => {
     const f = fixture({ hashString: async () => 'abcdef12' + '0'.repeat(56) });
