@@ -11,7 +11,7 @@ SillyTavern 연결, World Info 변환, JSON 이전 및 테스트 코드는 이 �
 - 원본 확장 출처: https://m.dcinside.com/mini/aichatfrontend/162
 - 원본이 동작하는 대상 엔진(확장 소스 저장소 아님): https://github.com/Pasta-Devs/Marinara-Engine
 - 포팅 대상: https://github.com/SillyTavern/SillyTavern
-- 소스: https://github.com/mallang0723/memoryVaultSilly
+- 소스: https://github.com/mallang0723/ST-memoryVault
 
 ## 원본 기억 보관함의 MIT 고지문
 

@@ -24,7 +24,7 @@ Marinara용 **기억 보관함 v2.1.1**의 플랫폼 독립 기능을 **SillyTav
 3. SillyTavern을 새로고침하고 채팅을 연 뒤 **기억 보관함**을 엽니다.
 
 ```text
-https://github.com/mallang0723/memoryVaultSilly
+https://github.com/mallang0723/ST-memoryVault
 ```
 
 ZIP으로 수동 설치할 때는 아래 위치에 풉니다. `manifest.json`이 확장 폴더 바로 아래에 있어야 합니다. 이미 ZIP으로 설치했다면 같은 확장을 다른 폴더에 중복 설치하지 마세요.
