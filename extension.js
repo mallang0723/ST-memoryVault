@@ -309,6 +309,8 @@ When current and historical facts differ, current facts take precedence.`;
     chronicleReviewId: "",
     chronicleJob: null,
     chronicleSelected: new Set(),
+    chronicleOpen: new Set(),
+    chronicleView: "tree",
     reviewThreads: [],
     reviewThreadSelected: new Set(),
     candThreads: [],
@@ -5481,23 +5483,58 @@ When current and historical facts differ, current facts take precedence.`;
       ${ep.keywords.length || ep.background.place ? `<span class="mmc-kw">${normalizeTextList([...ep.keywords, ep.background.place], 8, 60).map((k) => `<i>${esc(k)}</i>`).join("")}</span>` : ""}
     </article>`;
   }
+  // 구간 연대기: 활성 frontier를 이야기 순서로 보여 주고, 합본은 보관된 하위 기록을 펼쳐 볼 수 있다.
+  function chronicleChildren(ep) {
+    if (episodeMode(ep) !== "chapter") return [];
+    return ep.chronicle.childRefs.map((ref) => nodeById(ref.id)).filter(Boolean);
+  }
+  function chronicleNodeMarkup(ep, evaluation, depth = 0) {
+    const kids = chronicleChildren(ep);
+    const open = state.chronicleOpen instanceof Set && state.chronicleOpen.has(ep.id);
+    const toggle = kids.length ? `<button type="button" class="mmc-btn mmc-sm mmc-ghost mmc-chr-toggle" data-action="chronicle-toggle-node" data-id="${esc(ep.id)}" aria-expanded="${open}">${open ? "하위 접기" : `하위 ${kids.length}개 펼치기 · 보관·주입 안 함`}</button>` : "";
+    return `<div class="mmc-chr-node" data-depth="${depth}">${episodeCard(ep, evaluation)}${toggle}${open ? `<div class="mmc-chr-children">${kids.map((kid) => chronicleNodeMarkup(kid, evaluation, depth + 1)).join("")}</div>` : ""}</div>`;
+  }
+  function chronicleParentOf(id, nodes) { return nodes.find((ep) => episodeMode(ep) === "chapter" && ep.chronicle.childRefs.some((ref) => ref.id === id) && ep.chronicle.status !== "undone") || null; }
+  function chronicleListMarkup(nodes, evaluation) {
+    const label = (ep) => { const res = chronicleStateOf(ep, evaluation); return CHRONICLE_STATE_LABEL[res.state]?.[1] || CHRONICLE_REASON_LABEL[res.reason] || (res.state === "stale" ? "갱신 필요 · 주입 보류" : "보류"); };
+    const sorted = nodes.slice().sort((a, b) => (chronicleStateOf(a, evaluation).loc?.startIndex ?? 1e9) - (chronicleStateOf(b, evaluation).loc?.startIndex ?? 1e9) || (episodeMode(b) === "chapter") - (episodeMode(a) === "chapter"));
+    return `<div class="mmc-chr-table" role="table"><div class="mmc-chr-tr is-head" role="row"><span>선택</span><span>범위</span><span>단계</span><span>제목</span><span>부모</span><span>상태</span><span>주입</span></div>${sorted.map((ep) => {
+      const res = chronicleStateOf(ep, evaluation);
+      const parent = chronicleParentOf(ep.id, nodes);
+      const selectable = !["archived", "deleted", "undone"].includes(res.state);
+      const checked = selectable && state.chronicleSelected instanceof Set && state.chronicleSelected.has(ep.id);
+      return `<div class="mmc-chr-tr is-${esc(res.state)}" role="row" data-chr-row-id="${esc(ep.id)}"><span>${selectable ? `<input type="checkbox" data-chr-select="${esc(ep.id)}" ${checked ? "checked" : ""} aria-label="선택">` : ""}</span><span class="mmc-chr-range" data-label="범위">${esc(nodeRangeText(ep, res))}</span><span data-label="단계">${episodeMode(ep) === "chapter" ? `장 ${ep.chronicle.level}` : "장면"}</span><span><b>${esc(ep.title)}</b></span><span data-label="부모">${parent ? esc(truncate(parent.title, 18)) : "—"}</span><span data-label="상태">${esc(label(ep))}</span><span data-label="주입">${res.state === "approved" ? "주입" : "안 함"}</span></div>`;
+    }).join("")}</div>`;
+  }
   function episodeView() {
     const all = episodeList();
     const evaluation = chronicleEvaluation();
-    const hidden = (ep) => episodeMode(ep) !== "legacy" && ["archived", "undone"].includes(chronicleStateOf(ep, evaluation).state);
-    const live = all.filter((ep) => !ep.replacedBy && !hidden(ep)).sort((a, b) => String(b.at || b.createdAt).localeCompare(String(a.at || a.createdAt)));
-    const archived = all.filter((ep) => !ep.replacedBy && hidden(ep));
+    const legacy = all.filter((ep) => episodeMode(ep) === "legacy" && !ep.replacedBy).sort((a, b) => String(b.at || b.createdAt).localeCompare(String(a.at || a.createdAt)));
+    const nodes = all.filter((ep) => episodeMode(ep) !== "legacy" && !ep.replacedBy);
+    const stateOf = (ep) => chronicleStateOf(ep, evaluation).state;
+    const rows = chronicleRowsReady() ? state.chronicleRows : null;
+    const frontier = rows ? chronicleFrontier(nodes, rows, evaluation).map((n) => nodes.find((ep) => ep.id === n.id)).filter(Boolean)
+      : nodes.filter((ep) => !["archived", "deleted", "undone"].includes(stateOf(ep)));
+    const history = nodes.filter((ep) => ["deleted", "undone"].includes(stateOf(ep)));
     const old = all.filter((ep) => ep.replacedBy);
-    const selected = state.chronicleSelected instanceof Set ? [...state.chronicleSelected].filter((id) => live.some((ep) => ep.id === id)) : [];
-    const hasChronicle = all.some((ep) => episodeMode(ep) !== "legacy");
+    const selected = state.chronicleSelected instanceof Set ? [...state.chronicleSelected].filter((id) => frontier.some((ep) => ep.id === id)) : [];
+    const listView = state.chronicleView === "list";
+    const injected = nodes.filter((ep) => stateOf(ep) === "approved").length;
+    const archivedCount = nodes.filter((ep) => stateOf(ep) === "archived").length;
     const on = episodeInjectionOn(state.currentData);
     return `<div data-mmc-summary-alert-slot>${statusBanners()}</div>
-      <div class="mmc-toolbar"><div class="mmc-episode-note"><b>장면 기억 ${live.length}개</b><small>${on ? "장소·키워드가 대화에 나올 때 '현재' 사실만 들어가요." : "주입 꺼짐 · 보관만 해요."} 구간 기록은 고른 메시지 범위를 요약 전용 요청으로 정리하고 검토 후 저장해요.</small></div><div class="mmc-actions"><button class="mmc-btn mmc-primary" data-action="chronicle-new">${SVG.spark}<span>구간 기록 만들기</span></button><button class="mmc-btn" data-action="new-episode">${SVG.plus}<span>직접 추가</span></button><button class="mmc-btn" data-action="open-source" data-source="summaries" data-target="anchor">${SVG.summary}<span>요약·장면에서</span></button><button class="mmc-btn" data-action="open-source" data-source="messages" data-target="anchor">${SVG.message}<span>대화에서</span></button></div></div>
+      <div class="mmc-toolbar"><div class="mmc-episode-note"><b>장면 기억 ${legacy.length + frontier.length}개</b><small>${on ? "장소·키워드가 대화에 나올 때 '현재' 사실만 들어가요." : "주입 꺼짐 · 보관만 해요."} 구간 기록은 고른 메시지 범위를 요약 전용 요청으로 정리하고 검토 후 저장해요.</small></div><div class="mmc-actions"><button class="mmc-btn mmc-primary" data-action="chronicle-new">${SVG.spark}<span>구간 기록 만들기</span></button><button class="mmc-btn" data-action="new-episode">${SVG.plus}<span>직접 추가</span></button><button class="mmc-btn" data-action="open-source" data-source="summaries" data-target="anchor">${SVG.summary}<span>요약·장면에서</span></button><button class="mmc-btn" data-action="open-source" data-source="messages" data-target="anchor">${SVG.message}<span>대화에서</span></button></div></div>
       ${chronicleReviewCards()}
-      ${hasChronicle ? `<div class="mmc-chr-bar"><small>구간 기록 두 개 이상을 골라 하나의 장으로 합칠 수 있어요. 합친 뒤에는 장만 주입되고 원본은 보관돼요.</small><span><button class="mmc-btn mmc-sm mmc-primary" data-action="chronicle-merge-selected" ${selected.length >= 2 ? "" : "disabled"}>선택한 구간 합치기${selected.length ? ` (${selected.length})` : ""}</button><button class="mmc-btn mmc-sm" data-action="chronicle-settings">연대기 설정</button></span></div>` : ""}
-      <div class="mmc-episode-list">${live.length ? live.map((ep) => episodeCard(ep, evaluation)).join("") : '<div class="mmc-empty">아직 장면 기억이 없어요. 새 요약이나 장면을 모델로 정리하면 함께 만들어져요.</div>'}</div>
-      ${archived.length ? `<details class="mmc-episode-old mmc-chr-archive"><summary>보관된 원본·합치기 이력 ${archived.length}개 (주입하지 않아요)</summary>${archived.map((ep) => episodeCard(ep, evaluation)).join("")}</details>` : ""}
-      ${old.length ? `<details class="mmc-episode-old"><summary>지난 판 ${old.length}개 · 근거가 바뀌어 새로 정리되기 전 기록 (주입하지 않아요)</summary>${old.map(episodeCard).join("")}</details>` : ""}`;
+      ${nodes.length ? `<section class="mmc-chr-section">
+        <div class="mmc-chr-head"><div><b>구간 연대기</b><small>활성 ${frontier.length}개 · 주입 ${injected}개 · 보관 원본 ${archivedCount}개</small></div>
+          <span class="mmc-chr-view" role="tablist"><button type="button" class="mmc-btn mmc-sm ${listView ? "" : "mmc-primary"}" data-action="chronicle-view" data-view="tree" aria-selected="${!listView}">트리</button><button type="button" class="mmc-btn mmc-sm ${listView ? "mmc-primary" : ""}" data-action="chronicle-view" data-view="list" aria-selected="${listView}">목록</button></span></div>
+        <div class="mmc-chr-bar"><small>이어진 구간 두 개 이상을 골라 하나의 장으로 합쳐요. 장끼리도, 장과 장면도 합칠 수 있어요. 합친 뒤에는 장만 주입되고 원본은 보관돼요.</small><span><button class="mmc-btn mmc-sm mmc-primary" data-action="chronicle-merge-selected" ${selected.length >= 2 ? "" : "disabled"}>선택한 구간 합치기${selected.length ? ` (${selected.length})` : ""}</button>${selected.length ? '<button class="mmc-btn mmc-sm" data-action="chronicle-clear-selection">선택 해제</button>' : ""}<button class="mmc-btn mmc-sm" data-action="chronicle-settings">연대기 설정</button></span></div>
+        ${listView ? chronicleListMarkup(nodes, evaluation) : `<div class="mmc-chr-tree">${frontier.map((ep) => chronicleNodeMarkup(ep, evaluation)).join("") || '<div class="mmc-empty">활성 구간 기록이 없어요.</div>'}</div>`}
+        ${history.length && !listView ? `<details class="mmc-episode-old mmc-chr-archive"><summary>합치기 취소·삭제된 기록 ${history.length}개 (주입하지 않아요)</summary>${history.map((ep) => episodeCard(ep, evaluation)).join("")}</details>` : ""}
+      </section>` : ""}
+      ${nodes.length && legacy.length ? '<div class="mmc-chr-legacy-head"><b>이전 방식 장면 기억</b><small>요약·대화에서 만든 기록이에요. 구간 연대기 합치기 대상은 아니에요.</small></div>' : ""}
+      <div class="mmc-episode-list">${legacy.length ? legacy.map((ep) => episodeCard(ep, evaluation)).join("") : nodes.length ? "" : '<div class="mmc-empty">아직 장면 기억이 없어요. 구간 기록을 만들거나 새 요약·장면을 모델로 정리하면 생겨요.</div>'}</div>
+      ${old.length ? `<details class="mmc-episode-old"><summary>지난 판 ${old.length}개 · 근거가 바뀌어 새로 정리되기 전 기록 (주입하지 않아요)</summary>${old.map((ep) => episodeCard(ep)).join("")}</details>` : ""}`;
   }
   function episodeCandidateCard(kind, cand, index, selected) {
     const checked = selected.has(String(index));
@@ -5676,7 +5713,8 @@ When current and historical facts differ, current facts take precedence.`;
     const [tone, label] = CHRONICLE_STATE_LABEL[res.state] || ["is-warn", CHRONICLE_REASON_LABEL[res.reason] || (res.state === "stale" ? "갱신 필요 · 주입 보류" : "보류 · 주입 안 함")];
     const chips = [`<span class="mmc-chip is-soft mmc-chr-range">${esc(nodeRangeText(ep, res))}</span>`];
     if (c.mode === "chapter") chips.push(`<span class="mmc-chip is-soft">장 ${c.level}단계</span>`);
-    chips.push(`<span class="mmc-chip ${tone}" data-chr-state="${esc(res.state)}">${esc(label)}</span>`);
+    chips.push(`<span class="mmc-chip ${tone}" data-chr-state="${esc(res.state)}" data-chr-own="${esc(res.own || res.state)}">${esc(label)}</span>`);
+    if (res.state === "archived" && ["stale", "held"].includes(res.own)) chips.push(`<span class="mmc-chip is-warn">${esc(CHRONICLE_REASON_LABEL[res.reason] || "갱신 필요")}</span>`);
     if (res.state === "approved" && res.loc?.status === "moved") chips.push('<span class="mmc-chip is-soft">앞쪽 메시지 변동 · 원문 그대로</span>');
     if (c.revision > 1) chips.push(`<span class="mmc-chip is-soft">${c.revision}판</span>`);
     return chips.join("");
@@ -5686,10 +5724,11 @@ When current and historical facts differ, current facts take precedence.`;
     const id = esc(ep.id);
     if (res.state === "deleted") return `<button class="mmc-btn mmc-sm" data-action="chronicle-restore" data-id="${id}">되돌리기</button><button class="mmc-btn mmc-sm mmc-danger" data-action="chronicle-purge" data-id="${id}">영구 삭제</button>`;
     if (res.state === "undone") return "";
-    const recheck = ["stale", "held"].includes(res.state) && res.reason !== "source-changed" && res.reason !== "range-invalid"
+    const recheck = ["stale", "held"].includes(res.own || res.state) && res.reason !== "source-changed" && res.reason !== "range-invalid"
       ? `<button class="mmc-btn mmc-sm" data-action="chronicle-reconfirm" data-id="${id}">${res.reason === "imported" ? "원문 대조" : "다시 확인"}</button>` : "";
     const undo = ep.chronicle.mode === "chapter" ? `<button class="mmc-btn mmc-sm" data-action="chronicle-undo-merge" data-id="${id}">합치기 취소</button>` : "";
-    const regen = res.state === "archived" ? "" : `<button class="mmc-btn mmc-sm" data-action="chronicle-regenerate" data-id="${id}">${SVG.spark}<span>재생성</span></button>`;
+    // 보관된 장면은 편집만 한다(재생성은 겹침 검사와 충돌). 보관된 합본은 아래부터 다시 만들 수 있게 재생성을 둔다.
+    const regen = res.state === "archived" && ep.chronicle.mode !== "chapter" ? "" : `<button class="mmc-btn mmc-sm" data-action="chronicle-regenerate" data-id="${id}">${SVG.spark}<span>재생성</span></button>`;
     return `${recheck}${regen}${undo}`;
   }
 
@@ -8832,6 +8871,14 @@ When current and historical facts differ, current facts take precedence.`;
       if (action === "chronicle-merge-selected") { await runChronicleMerge([...state.chronicleSelected]); return; }
       if (action === "chronicle-undo-merge") { await undoChronicleMerge(String(actionEl.dataset.id || "")); return; }
       if (action === "chronicle-settings") { state.layer = "chronicle-settings"; render(); return; }
+      if (action === "chronicle-view") { state.chronicleView = actionEl.dataset.view === "list" ? "list" : "tree"; render(); return; }
+      if (action === "chronicle-clear-selection") { state.chronicleSelected = new Set(); render(); return; }
+      if (action === "chronicle-toggle-node") {
+        const id = String(actionEl.dataset.id || "");
+        if (!(state.chronicleOpen instanceof Set)) state.chronicleOpen = new Set();
+        if (state.chronicleOpen.has(id)) state.chronicleOpen.delete(id); else state.chronicleOpen.add(id);
+        render(); return;
+      }
       if (action === "chronicle-save-settings") { await saveChronicleSettings(); return; }
       if (action === "chronicle-pick") {
         captureChronicleDraft();

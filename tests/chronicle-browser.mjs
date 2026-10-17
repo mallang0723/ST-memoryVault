@@ -236,6 +236,7 @@ try {
     await act('delete-episode').click();
     await page.waitForFunction(id => SillyTavern.getContext().chatMetadata.memoryCabinetV1.episodes.find(e => e.id === id)?.chronicle.status === 'deleted', secondId);
     await idle();
+    await root.locator('.mmc-chr-archive summary').click();
     await root.locator(`[data-episode-id="${secondId}"] [data-action="chronicle-restore"]`).click();
     await page.waitForFunction(id => SillyTavern.getContext().chatMetadata.memoryCabinetV1.episodes.find(e => e.id === id)?.chronicle.status === 'stale', secondId);
     await idle();
@@ -243,6 +244,7 @@ try {
     await act('delete-episode').click();
     await page.waitForFunction(id => SillyTavern.getContext().chatMetadata.memoryCabinetV1.episodes.find(e => e.id === id)?.chronicle.status === 'deleted', secondId);
     await idle();
+    await root.locator('.mmc-chr-archive summary').click();
     await root.locator(`[data-episode-id="${secondId}"] [data-action="chronicle-purge"]`).click();
     await page.waitForFunction(() => SillyTavern.getContext().chatMetadata.memoryCabinetV1.episodes.length === 1);
     await idle();
