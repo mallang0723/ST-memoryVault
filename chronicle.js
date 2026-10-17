@@ -500,3 +500,53 @@ export function planAutoScene(episodes, rows, settings, evaluation = evaluateChr
     if (responses.length < need) return { ok: false, reason: 'waiting', have: responses.length, need, start: cursor };
     return { ok: true, start: cursor, end: responses[settings.autoEveryResponses - 1], responses: settings.autoEveryResponses };
 }
+
+// ── Injection plan (phase G) ──
+/** The active (non-archived) node standing for `id`: itself, or its live merged ancestor. */
+export function activeRepresentative(episodes, id, evaluation) {
+    const nodes = chronicleNodes(episodes);
+    let cur = id;
+    const seen = new Set();
+    while (cur && !seen.has(cur)) {
+        seen.add(cur);
+        const res = evaluation.get(cur);
+        if (!res) return '';
+        if (res.state !== 'archived') return cur;
+        cur = nodes.get(cur)?.c.archivedBy || '';
+    }
+    return '';
+}
+
+/**
+ * Decides how each valid frontier record is injected.
+ * - constant: the newest N range scenes and J chapters, newest first, within
+ *   (budgetTokens - oldDetailTokens). A constant delta pulls in the records it
+ *   was written against (dependency closure, via their live representative);
+ *   if those do not fit, the delta itself falls back to keyword-only.
+ * - keyword: every other valid record (older detail; native WI budget applies).
+ * Archived, stale, held, deleted and undone records are not injected at all.
+ */
+export function planChronicleInjection(episodes, rows, settings, tokensOf, evaluation = evaluateChronicle(episodes, rows)) {
+    const frontier = chronicleFrontier(episodes, rows, evaluation).filter(n => n.res.state === 'approved');
+    const plan = new Map(frontier.map(n => [n.id, { mode: 'keyword', reason: 'older', tokens: tokensOf(n.ep) }]));
+    const newest = frontier.slice().sort((a, b) => (b.res.loc?.endIndex ?? -1) - (a.res.loc?.endIndex ?? -1));
+    const recent = [
+        ...newest.filter(n => n.c.mode === 'range').slice(0, settings.recentScenes),
+        ...newest.filter(n => n.c.mode === 'chapter').slice(0, settings.recentChapters),
+    ].sort((a, b) => (b.res.loc?.endIndex ?? -1) - (a.res.loc?.endIndex ?? -1));
+    const cap = Math.max(0, settings.budgetTokens - settings.oldDetailTokens);
+    let used = 0;
+    const byId = new Map(frontier.map(n => [n.id, n]));
+    for (const node of recent) {
+        const entry = plan.get(node.id);
+        if (entry.mode === 'constant') continue;
+        const deps = [...new Set(node.c.contextRefs.map(ref => activeRepresentative(episodes, ref.id, evaluation)).filter(id => id && id !== node.id && byId.has(id)))]
+            .filter(id => plan.get(id).mode !== 'constant');
+        const cost = entry.tokens + deps.reduce((sum, id) => sum + plan.get(id).tokens, 0);
+        if (used + cost > cap) { entry.reason = deps.length && used + entry.tokens <= cap ? 'dependency-budget' : 'budget'; continue; }
+        used += cost;
+        entry.mode = 'constant'; entry.reason = 'recent';
+        for (const id of deps) Object.assign(plan.get(id), { mode: 'constant', reason: 'dependency' });
+    }
+    return { plan, constantTokens: used, cap, keywordTokens: [...plan.values()].filter(e => e.mode === 'keyword').reduce((s, e) => s + e.tokens, 0) };
+}

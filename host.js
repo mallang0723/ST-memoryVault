@@ -386,6 +386,12 @@ export function createHost({ getContext, fetchImpl = globalThis.fetch, worldInfo
         if (parts.join('/') === 'generate/raw' && method === 'POST') return generate(body, options.timeoutMs);
         if (parts.join('/') === 'generate/isolated' && method === 'POST') return generate(body, options.timeoutMs, true);
         if (parts.join('/') === 'chronicle/connections' && method === 'GET') return listSummaryConnections(getContext());
+        if (parts.join('/') === 'worldinfo/scan' && method === 'POST') {
+            if (!worldInfo.scan) throw new Error('이 환경에서는 로어북 미리보기를 할 수 없습니다.');
+            assertChat(options.chatId || chatIdentity(getContext()));
+            const texts = (Array.isArray(body.texts) ? body.texts : []).map(String).slice(-40);
+            return { text: String(await worldInfo.scan(texts) || '') };
+        }
         if (parts[0] === 'lorebooks') {
             if (parts.length === 1 && method === 'GET') {
                 const chatId = url.searchParams.get('chatId');

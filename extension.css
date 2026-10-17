@@ -941,3 +941,7 @@
 #mmc-root-v1 .mmc-chr-section .mmc-episode-head>div{flex:1 1 calc(100% - 40px)}
 #mmc-root-v1 .mmc-chr-section .mmc-episode-head .mmc-chips{flex-wrap:wrap}}
 #mmc-root-v1 .mmc-chr-auto{color:var(--mv-accent-ink,var(--mv-accent))!important;font-weight:600}
+#mmc-root-v1 .mmc-chr-preview-table .mmc-chr-tr{grid-template-columns:110px 56px minmax(0,1.6fr) minmax(0,1.3fr) 80px minmax(0,1fr)}
+#mmc-root-v1 .mmc-chr-tr.is-keyword{color:var(--mv-ink-2)}
+@media(max-width:700px){#mmc-root-v1 .mmc-chr-preview-table .mmc-chr-tr{grid-template-columns:minmax(0,1fr) minmax(0,1fr)}
+#mmc-root-v1 .mmc-chr-preview-table .mmc-chr-tr>span:nth-child(3){grid-column:1/-1;order:-1}}

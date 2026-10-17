@@ -211,6 +211,21 @@ try {
     await shot('tree-after-undo-desktop');
     check('undo of #1~#10 under #1~#20 undoes the ancestor first (no model call); originals return, history kept');
 
+    // Injection preview: the three active scenes are constant and actually selected by the native scanner.
+    await act('chronicle-preview').click();
+    await root.locator('.mmc-chr-preview-table').waitFor();
+    await act('chronicle-preview-scan').click();
+    await page.waitForFunction(() => document.querySelectorAll('#mmc-root-v1 [data-chr-actual="실제 포함"]').length >= 3);
+    for (const id of [A, B, D]) assert.match(await root.locator(`[data-chr-preview-id="${id}"]`).innerText(), /상시 · (최근|의존 기록)[\s\S]*실제 포함/);
+    for (const id of [C, E]) assert.match(await root.locator(`[data-chr-preview-id="${id}"]`).innerText(), /합치기 취소됨/);
+    assert.match(await root.locator('.mmc-chronicle-layer').innerText(), /원문 숨김\(ghost\)은 지원하지 않아요/);
+    await shot('injection-preview-desktop');
+    await root.locator('.mmc-chronicle-layer [data-action="close-layer"]').first().click({ force: true });
+    await idle();
+    hit = await scan('nothing related at all');
+    assert.ok(hit.includes('ALPHA-FACT') && hit.includes('DELTA-FACT'), 'recent records are constant: injected without a keyword');
+    check('injection preview: recent records constant and confirmed by a native dry-run scan; ghost marked unsupported');
+
     // List view.
     await act('chronicle-view', '[data-view="list"]').click(); await idle();
     assert.equal(await root.locator('.mmc-chr-tr:not(.is-head)').count(), 5);
