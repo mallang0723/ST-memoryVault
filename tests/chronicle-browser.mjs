@@ -48,7 +48,7 @@ await page.route('**/*', route => {
 const root = page.locator('#mmc-root-v1');
 const act = (action, extra = '') => root.locator(`[data-action="${action}"]${extra}`).filter({ visible: true }).first();
 const data = () => page.evaluate(() => structuredClone(SillyTavern.getContext().chatMetadata.memoryCabinetV1));
-const idle = () => page.waitForFunction(() => !document.querySelector('#mmc-root-v1 .mmc-busy'), null, { timeout: 60000 });
+const idle = async () => { await page.waitForFunction(() => !document.querySelector('#mmc-root-v1 .mmc-busy'), null, { timeout: 60000 }); await page.waitForTimeout(400); };
 const check = message => console.log(`PASS ${message}`);
 const lines = [
     ['QA User', 'Mina, I found an old brass key under the library desk.'], ['QA Mina', 'Mina takes the brass key and hides it in her coat. "Tell no one."'],
@@ -218,17 +218,56 @@ try {
     await idle();
     check('source edited during the call: result held, approve disabled, discard works');
 
-    // The edited source invalidates the second scene's range; it shows as changed.
+    // The edited source invalidates the second scene: persisted stale, card badge, WI withheld.
     await root.locator('.mmc-tab[data-tab="overview"]').click();
     await root.locator('.mmc-tab[data-tab="episode"]').click();
     await idle();
-    assert.match(await root.locator(`[data-episode-id="${d.episodes[1].id}"]`).innerText(), /원문이 바뀌었어요/);
-    // Delete the second scene through the editor.
-    await root.locator(`[data-episode-id="${d.episodes[1].id}"] [data-action="edit-episode"]`).click();
+    const secondId = d.episodes[1].id;
+    await page.waitForFunction(id => SillyTavern.getContext().chatMetadata.memoryCabinetV1.episodes.find(e => e.id === id)?.chronicle.status === 'stale', secondId);
+    await idle();
+    assert.match(await root.locator(`[data-episode-id="${secondId}"]`).innerText(), /원문 변경 · 주입 보류/);
+    const staleScan = await scan('We should go back to the archive near the harbor.');
+    assert.ok(!staleScan.includes('brother is alive'), staleScan);
+    await page.waitForTimeout(450); await page.screenshot({ path: `${shots}/chronicle-stale-desktop.png` });
+    check('edited source: scene persisted as stale, badge shown, World Info withholds it');
+
+    // Delete is a tombstone: restore brings it back (still stale), purge removes it.
+    await root.locator(`[data-episode-id="${secondId}"] [data-action="edit-episode"]`).click();
     await act('delete-episode').click();
+    await page.waitForFunction(id => SillyTavern.getContext().chatMetadata.memoryCabinetV1.episodes.find(e => e.id === id)?.chronicle.status === 'deleted', secondId);
+    await idle();
+    await root.locator(`[data-episode-id="${secondId}"] [data-action="chronicle-restore"]`).click();
+    await page.waitForFunction(id => SillyTavern.getContext().chatMetadata.memoryCabinetV1.episodes.find(e => e.id === id)?.chronicle.status === 'stale', secondId);
+    await idle();
+    await root.locator(`[data-episode-id="${secondId}"] [data-action="edit-episode"]`).click();
+    await act('delete-episode').click();
+    await page.waitForFunction(id => SillyTavern.getContext().chatMetadata.memoryCabinetV1.episodes.find(e => e.id === id)?.chronicle.status === 'deleted', secondId);
+    await idle();
+    await root.locator(`[data-episode-id="${secondId}"] [data-action="chronicle-purge"]`).click();
     await page.waitForFunction(() => SillyTavern.getContext().chatMetadata.memoryCabinetV1.episodes.length === 1);
     await idle();
-    check('edited source is flagged on the scene card; delete removes the scene');
+    check('delete keeps a tombstone with restore; purge removes it permanently');
+
+    // Export -> import puts range scenes on hold; 원문 대조 restores the one that still matches.
+    const exported = await data();
+    await act('settings').click();
+    await root.locator('[data-action="settings-tab"][data-settings-tab="data"]').click();
+    const chooser = page.waitForEvent('filechooser');
+    await act('import-memory').click();
+    await (await chooser).setFiles({ name: 'memory.json', mimeType: 'application/json', buffer: Buffer.from(JSON.stringify({ format: 'memory-vault', version: 1, data: exported })) });
+    await page.waitForFunction(() => document.querySelector('.mmc-toast')?.textContent.includes('가져왔습니다'));
+    await page.waitForFunction(() => SillyTavern.getContext().chatMetadata.memoryCabinetV1.episodes[0]?.chronicle.invalidReason === 'imported');
+    await idle();
+    if (await root.locator('.mmc-layer [data-action="close-layer"]').count()) await root.locator('.mmc-layer [data-action="close-layer"]').first().click();
+    await root.locator('.mmc-tab[data-tab="episode"]').click();
+    await idle();
+    const firstId = exported.episodes[0].id;
+    assert.ok(!(await scan('the brass key')).includes('librarian'), 'imported scene is not injected before verification');
+    await root.locator(`[data-episode-id="${firstId}"] [data-action="chronicle-reconfirm"]`).click();
+    await page.waitForFunction(id => SillyTavern.getContext().chatMetadata.memoryCabinetV1.episodes.find(e => e.id === id)?.chronicle.status === 'approved', firstId);
+    await idle();
+    assert.ok((await scan('the brass key')).includes('librarian'));
+    check('imported range scene is held until 원문 대조 confirms the source, then injects again');
 
     // Mobile layout.
     await page.setViewportSize({ width: 390, height: 844 });

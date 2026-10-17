@@ -8,6 +8,7 @@ export function mountMemoryVault(host) {
   const {
     normalizeEpisodeChronicle, normalizeChronicleState, assertChronicleSize, holdImportedChronicle, rangeAfterCut,
     buildRange, locateRange, rangesOverlap, completedResponses, normalizeReview, strongHash,
+    evaluateChronicle, chronicleFrontier,
     RANGE_SUMMARY_MAX, SCENE_PROMPT_VERSION,
   } = chronicleLib;
 
@@ -1916,6 +1917,11 @@ When current and historical facts differ, current facts take precedence.`;
         else await primeSummaryObserver();
       } else if (snapshot?.id === currentId) {
         await acceptObservedChatSnapshot(currentId, snapshot);
+        // 보관함이 열려 있으면 편집·스와이프·삭제를 바로 연대기 상태에 반영한다(닫혀 있어도 생성 직전 검사가 막는다).
+        if (!document.getElementById(ROOT_ID)?.hidden && !state.layer && chronicleRowsReady()) {
+          try { await loadChronicleRows(); if (await refreshChronicleValidity() || state.activeTab === "episode") render(); }
+          catch (error) { console.warn("[기억 보관함] scene check", error); }
+        }
       }
     };
     const unsubscribe = host.onChange(applyChange);
@@ -5264,9 +5270,18 @@ When current and historical facts differ, current facts take precedence.`;
       updatedAt: String(raw.updatedAt || raw.createdAt || nowIso()),
     };
   }
-  function episodeMode(ep) { return ep?.chronicle?.mode === "range" ? "range" : "legacy"; }
-  // 구간 기록은 승인된 판만 주입한다. 원문 변경·가져옴·분기 보류는 주입하지 않는다.
-  function episodeInjectable(ep) { return episodeMode(ep) === "legacy" || ep.chronicle.status === "approved"; }
+  function episodeMode(ep) { const mode = ep?.chronicle?.mode; return mode === "range" || mode === "chapter" ? mode : "legacy"; }
+  // 연대기 기록(구간·합본)은 지금 원문·의존 관계 기준으로 유효한 승인 판만 주입한다.
+  // 원문 변경·참고 기록 변경·하위 변경·가져옴·분기 보류·삭제·보관(합본 아래)은 주입하지 않는다.
+  function chronicleEvaluation(data = state.currentData) {
+    if (!chronicleRowsReady()) return null;
+    return evaluateChronicle(safeArray(parseRecord(data).episodes), state.chronicleRows);
+  }
+  function episodeInjectable(ep, evaluation = null) {
+    if (episodeMode(ep) === "legacy") return true;
+    if (evaluation) return evaluation.get(ep.id)?.state === "approved";
+    return ep.chronicle.status === "approved" && !ep.chronicle.archivedBy;
+  }
   function episodeList(data = state.currentData) { return safeArray(parseRecord(data).episodes).map(normalizeEpisode).filter(Boolean); }
   function liveEpisodes(data = state.currentData) { return episodeList(data).filter((ep) => !ep.replacedBy); }
   function episodeInjectionOn(data) { return parseRecord(data).episodeInjection !== false; }
@@ -5374,8 +5389,9 @@ When current and historical facts differ, current facts take precedence.`;
     const plans = [];
     if (!episodeInjectionOn(data)) return plans;
     const effective = restrictionEffective(chat);
+    const evaluation = chronicleEvaluation(data);
     for (const ep of liveEpisodes(data)) {
-      if (!episodeInjectable(ep)) continue;
+      if (!episodeInjectable(ep, evaluation)) continue;
       const keys = normalizeTextList([...ep.keywords, ep.background.place], 8, 60).filter((key) => key.length >= 2);
       if (!keys.length) continue;
       const eventScope = normalizeKnownBy(ep.event.knownBy);
@@ -5560,9 +5576,10 @@ When current and historical facts differ, current facts take precedence.`;
       const old = list[idx];
       const next = normalizeEpisode({ ...old, ...draft, id: old.id, createdAt: old.createdAt, updatedAt: now, chronicle: old.chronicle });
       // 구간 기록을 직접 고치면 판(revision)을 올리고 이전 판을 남긴다. 키워드만 바꾼 경우도 기록한다.
-      if (episodeMode(old) === "range") {
+      if (episodeMode(old) !== "legacy") {
         if (String(draft.event?.summary || "").length > RANGE_SUMMARY_MAX) throw new Error(`사건 요약은 ${RANGE_SUMMARY_MAX}자 이하로 줄여 주세요.`);
-        const content = (ep) => JSON.stringify([ep.title, ep.keywords, ep.background, ep.event, ep.facts.map((f) => [f.text, f.status, f.knownBy || []]), ep.characters]);
+        // 키워드만 바꾼 경우는 검색 계획만 달라진다. 판을 올리지 않아 의존 기록을 무효화하지 않는다.
+        const content = (ep) => JSON.stringify([ep.title, ep.background, ep.event, ep.facts.map((f) => [f.text, f.status, f.knownBy || []]), ep.characters]);
         if (content(old) !== content(next)) {
           next.chronicle = { ...old.chronicle, revision: old.chronicle.revision + 1, previous: [...old.chronicle.previous, { revision: old.chronicle.revision, savedAt: now, reason: "edited", title: old.title, summary: old.event.summary, keywords: old.keywords }] };
         }
@@ -5610,7 +5627,7 @@ When current and historical facts differ, current facts take precedence.`;
   async function loadChronicleConnections() {
     try { state.chronicleConnections = safeArray(await api("chronicle/connections")); } catch { state.chronicleConnections = []; }
   }
-  function chronicleRowsReady() { return state.chronicleRowsChatId === String(state.selectedChatId || ""); }
+  function chronicleRowsReady() { return !!state.selectedChatId && state.chronicleRowsChatId === String(state.selectedChatId); }
   function sceneLocation(ep) {
     if (!chronicleRowsReady()) return { status: "unknown" };
     return locateRange(state.chronicleRows, ep.chronicle.range);
@@ -5622,24 +5639,132 @@ When current and historical facts differ, current facts take precedence.`;
     if (loc.status === "exact" || loc.status === "moved") return rangeLabel(loc.startIndex, loc.endIndex);
     return r?.count ? `${rangeLabel(r.startIndex, r.startIndex + r.count - 1)} (생성 당시)` : "구간 확인 불가";
   }
-  const SCENE_STATUS_CHIP = {
-    approved: ["is-ok", "승인됨"], stale: ["is-warn", "원문 변경 · 주입 보류"], held: ["is-warn", "보류 · 주입 안 함"], deleted: ["is-soft", "삭제됨"],
+  const CHRONICLE_STATE_LABEL = {
+    approved: ["is-ok", "승인 · 활성"], archived: ["is-soft", "보관 · 주입 안 함"], deleted: ["is-soft", "삭제됨 · 되돌리기 가능"], undone: ["is-soft", "합치기 취소됨"],
   };
-  function sceneStatusChips(ep) {
+  const CHRONICLE_REASON_LABEL = {
+    "source-changed": "원문 변경 · 주입 보류", "dependency-changed": "참고한 기록 변경 · 주입 보류", "child-changed": "갱신 필요 · 주입 보류",
+    imported: "가져온 기록 · 원문 대조 필요", ambiguous: "같은 원문이 여러 곳 · 보류", "range-invalid": "구간 정보 손상 · 보류", "range-after-cut": "분기 뒤 구간 · 보류",
+  };
+  function chronicleStateOf(ep, evaluation = chronicleEvaluation()) {
+    const res = evaluation?.get(ep.id);
+    if (res) return res;
     const c = ep.chronicle;
-    const [tone, label] = SCENE_STATUS_CHIP[c.status] || SCENE_STATUS_CHIP.held;
-    const chips = [`<span class="mmc-chip is-soft mmc-chr-range">${esc(sceneRangeText(ep))}</span>`, `<span class="mmc-chip ${tone}">${esc(label)}</span>`];
-    const loc = sceneLocation(ep);
-    if (c.status === "approved" && loc.status === "moved") chips.push('<span class="mmc-chip is-soft">앞쪽 메시지 변동 · 원문 그대로</span>');
-    if (c.status === "approved" && (loc.status === "changed" || loc.status === "ambiguous")) chips.push(`<span class="mmc-chip is-warn">${loc.status === "changed" ? "원문이 바뀌었어요" : "같은 원문이 여러 곳"}</span>`);
-    if (c.invalidReason === "imported") chips.push('<span class="mmc-chip is-warn">가져온 기록 · 원문 대조 필요</span>');
+    return { state: c.archivedBy && c.status === "approved" ? "archived" : c.status, own: c.status, reason: c.invalidReason, loc: null };
+  }
+  function nodeRangeText(ep, res) {
+    const loc = res?.loc;
+    if (loc && ["exact", "moved", "merged"].includes(loc.status)) return rangeLabel(loc.startIndex, loc.endIndex);
+    if (episodeMode(ep) === "range") return sceneRangeText(ep);
+    return "구간 확인 불가";
+  }
+  function sceneStatusChips(ep, evaluation = chronicleEvaluation()) {
+    const c = ep.chronicle;
+    const res = chronicleStateOf(ep, evaluation);
+    const [tone, label] = CHRONICLE_STATE_LABEL[res.state] || ["is-warn", CHRONICLE_REASON_LABEL[res.reason] || (res.state === "stale" ? "갱신 필요 · 주입 보류" : "보류 · 주입 안 함")];
+    const chips = [`<span class="mmc-chip is-soft mmc-chr-range">${esc(nodeRangeText(ep, res))}</span>`];
+    if (c.mode === "chapter") chips.push(`<span class="mmc-chip is-soft">장 ${c.level}단계</span>`);
+    chips.push(`<span class="mmc-chip ${tone}" data-chr-state="${esc(res.state)}">${esc(label)}</span>`);
+    if (res.state === "approved" && res.loc?.status === "moved") chips.push('<span class="mmc-chip is-soft">앞쪽 메시지 변동 · 원문 그대로</span>');
     if (c.revision > 1) chips.push(`<span class="mmc-chip is-soft">${c.revision}판</span>`);
     return chips.join("");
   }
-  function sceneActions(ep) {
+  function sceneActions(ep, evaluation = chronicleEvaluation()) {
+    const res = chronicleStateOf(ep, evaluation);
+    const id = esc(ep.id);
+    if (res.state === "deleted") return `<button class="mmc-btn mmc-sm" data-action="chronicle-restore" data-id="${id}">되돌리기</button><button class="mmc-btn mmc-sm mmc-danger" data-action="chronicle-purge" data-id="${id}">영구 삭제</button>`;
+    if (res.state === "undone") return "";
+    const recheck = ["stale", "held"].includes(res.state) && res.reason !== "source-changed" && res.reason !== "range-invalid"
+      ? `<button class="mmc-btn mmc-sm" data-action="chronicle-reconfirm" data-id="${id}">${res.reason === "imported" ? "원문 대조" : "다시 확인"}</button>` : "";
+    const undo = ep.chronicle.mode === "chapter" ? `<button class="mmc-btn mmc-sm" data-action="chronicle-undo-merge" data-id="${id}">합치기 취소</button>` : "";
+    const regen = res.state === "archived" ? "" : `<button class="mmc-btn mmc-sm" data-action="chronicle-regenerate" data-id="${id}">${SVG.spark}<span>재생성</span></button>`;
+    return `${recheck}${regen}${undo}`;
+  }
+
+  // 지금 원문·의존 관계로 다시 판정한 결과를 저장한다. 승인 → 갱신 필요/보류 전환만 자동으로 한다.
+  // 다시 승인 상태로 돌리는 것은 사용자의 '다시 확인'·재생성으로만 한다.
+  async function refreshChronicleValidity() {
+    if (!state.currentChat?.id || !ownershipAllowsData() || !chronicleRowsReady()) return false;
+    const pending = (data) => {
+      const evaluation = evaluateChronicle(safeArray(data?.episodes), state.chronicleRows);
+      return safeArray(data?.episodes).filter((ep) => episodeMode(ep) !== "legacy" && !ep.replacedBy && ep.chronicle.status === "approved")
+        .map((ep) => [ep, evaluation.get(ep.id)]).filter(([, res]) => res && (res.own === "stale" || res.own === "held"));
+    };
+    if (!pending(normalizeData(state.currentData)).length) return false;
+    const data = await freshOwnedData();
+    data.episodes = safeArray(data.episodes).map(normalizeEpisode).filter(Boolean);
+    const changes = pending(data);
+    if (!changes.length) return false;
+    for (const [ep, res] of changes) ep.chronicle = { ...ep.chronicle, status: res.own, invalidReason: res.reason };
+    await persistData(data, { silent: true });
+    return true;
+  }
+  async function reconfirmChronicleNode(id) {
+    const rows = await loadChronicleRows();
+    const data = await freshOwnedData();
+    const list = safeArray(data.episodes).map(normalizeEpisode).filter(Boolean);
+    const ep = list.find((row) => row.id === id && episodeMode(row) !== "legacy");
+    if (!ep) return;
     const c = ep.chronicle;
-    const verify = c.status === "held" && c.invalidReason === "imported" ? `<button class="mmc-btn mmc-sm" data-action="chronicle-verify" data-id="${esc(ep.id)}">원문 대조</button>` : "";
-    return `${verify}<button class="mmc-btn mmc-sm" data-action="chronicle-regenerate" data-id="${esc(ep.id)}">${SVG.spark}<span>재생성</span></button>`;
+    const evaluation = evaluateChronicle(list, rows);
+    let loc = null;
+    if (c.mode === "range") {
+      loc = locateRange(rows, c.range);
+      if (loc.status !== "exact" && loc.status !== "moved") throw new Error(loc.status === "ambiguous" ? "같은 원문이 여러 곳에 있어 구간을 확정할 수 없어요. 보류를 유지했어요." : "원문이 바뀌어 다시 확인할 수 없어요. 재생성해 주세요.");
+    } else {
+      const bad = c.childRefs.filter((ref) => evaluation.get(ref.id)?.own !== "approved");
+      if (bad.length) throw new Error("하위 기록 중 갱신이 필요하거나 보류된 것이 있어요. 아래 기록부터 고쳐 주세요.");
+    }
+    const byId = new Map(list.map((row) => [row.id, row]));
+    const keptRefs = c.contextRefs.filter((ref) => evaluation.get(ref.id)?.own === "approved");
+    const dropped = c.contextRefs.length - keptRefs.length;
+    const message = c.mode === "chapter"
+      ? "하위 기록이 바뀐 뒤에도 이 합본 본문을 그대로 쓸까요? 하위 변경 내용은 합본에 반영되지 않아요(재생성하면 반영)."
+      : c.invalidReason === "imported" ? `원문 ${rangeLabel(loc.startIndex, loc.endIndex)}와 일치해요. 이 기록을 다시 주입 대상으로 돌릴까요?`
+      : `원문 ${rangeLabel(loc.startIndex, loc.endIndex)}는 그대로예요. 참고했던 앞 기록이 바뀌었는데, 이 기록이 그 기록 없이도 읽히는지 확인했나요?${dropped ? ` (사라진 참고 ${dropped}개는 연결을 끊어요)` : ""}`;
+    if (!window.confirm(message)) return;
+    ep.chronicle = {
+      ...c, status: "approved", invalidReason: "",
+      contextRefs: keptRefs.map((ref) => ({ ...ref, revision: byId.get(ref.id).chronicle.revision })),
+      ...(c.mode === "chapter" ? { childRefs: c.childRefs.map((ref) => ({ ...ref, revision: byId.get(ref.id).chronicle.revision })) } : { range: { ...c.range, startIndex: loc.startIndex } }),
+    };
+    data.episodes = list;
+    await persistData(data);
+    render();
+  }
+  async function deleteChronicleNode(id) {
+    const data = await freshOwnedData();
+    const list = safeArray(data.episodes).map(normalizeEpisode).filter(Boolean);
+    const ep = list.find((row) => row.id === id);
+    if (!ep) return;
+    if (ep.chronicle.mode === "chapter") throw new Error("합본은 '합치기 취소'로 정리해요. 원본 기록이 다시 활성화돼요.");
+    if (ep.chronicle.archivedBy && list.some((row) => row.id === ep.chronicle.archivedBy && !["undone", "deleted"].includes(row.chronicle?.status))) throw new Error("합본 안에 보관된 기록이에요. 먼저 그 합본의 합치기를 취소해 주세요.");
+    if (!window.confirm("이 구간 기록을 삭제할까요? 주입에서 바로 빠지고, 이 기록을 참고한 기록은 갱신 필요로 바뀌어요. 삭제 후에도 되돌릴 수 있어요.")) return;
+    ep.chronicle = { ...ep.chronicle, statusBeforeDelete: ep.chronicle.status, status: "deleted", deletedAt: nowIso() };
+    data.episodes = list;
+    await persistData(data);
+    state.episodeDraft = null; state.layer = null;
+    render();
+  }
+  async function restoreChronicleNode(id) {
+    const data = await freshOwnedData();
+    const list = safeArray(data.episodes).map(normalizeEpisode).filter(Boolean);
+    const ep = list.find((row) => row.id === id && row.chronicle?.status === "deleted");
+    if (!ep) return;
+    ep.chronicle = { ...ep.chronicle, status: ep.chronicle.statusBeforeDelete || "approved", statusBeforeDelete: "", deletedAt: "" };
+    data.episodes = list;
+    await persistData(data);
+    try { await loadChronicleRows(); await refreshChronicleValidity(); } catch (error) { console.warn("[기억 보관함] scene check", error); }
+    render();
+  }
+  async function purgeChronicleNode(id) {
+    if (!window.confirm("이 기록을 완전히 지울까요? 되돌릴 수 없어요.")) return;
+    const data = await freshOwnedData();
+    const list = safeArray(data.episodes).map(normalizeEpisode).filter(Boolean);
+    if (!list.some((row) => row.id === id && row.chronicle?.status === "deleted")) return;
+    data.episodes = list.filter((row) => row.id !== id);
+    await persistData(data);
+    render();
   }
 
   // ── 구간 선택 ──
@@ -5662,10 +5787,14 @@ When current and historical facts differ, current facts take precedence.`;
   }
   function scenePublic(ep) { return !normalizeKnownBy(ep.event.knownBy).length && ep.facts.every((fact) => !normalizeKnownBy(fact.knownBy).length); }
   // 이전 장면은 승인·공개·원문 일치 기록의 본문만 쓴다. 제한 기억은 요약 요청에 섞지 않는다.
+  // 활성 frontier(합본이면 합본 하나) 중 지금 유효한 노드의 위치. 보관·삭제·취소된 기록은 빠진다.
+  function activeNodeLocs(data = state.currentData, rows = state.chronicleRows) {
+    if (!chronicleRowsReady()) return [];
+    return chronicleFrontier(safeArray(parseRecord(data).episodes).map(normalizeEpisode).filter(Boolean), rows)
+      .filter((n) => n.res.loc && ["exact", "moved", "merged"].includes(n.res.loc.status)).map((n) => ({ ep: n.ep, res: n.res, loc: n.res.loc }));
+  }
   function priorContextFor(data, start, excludeId = "") {
-    const usable = rangeScenes(data).filter((ep) => ep.id !== excludeId && ep.chronicle.status === "approved" && scenePublic(ep))
-      .map((ep) => ({ ep, loc: sceneLocation(ep) }))
-      .filter(({ loc }) => (loc.status === "exact" || loc.status === "moved") && loc.endIndex < start)
+    const usable = activeNodeLocs(data).filter(({ ep, res, loc }) => ep.id !== excludeId && res.state === "approved" && scenePublic(ep) && loc.endIndex < start)
       .sort((a, b) => b.loc.endIndex - a.loc.endIndex).slice(0, 3);
     const parts = []; const refs = []; let tokens = 0;
     for (const { ep } of usable) {
@@ -5675,7 +5804,7 @@ When current and historical facts differ, current facts take precedence.`;
       if (tokens + cost > CHRONICLE_PRIOR_TOKENS) break;
       tokens += cost;
       parts.unshift(body);
-      refs.unshift({ kind: "episode", id: ep.id, revision: ep.chronicle.revision, hash: textHash(body) });
+      refs.unshift({ kind: ep.chronicle.mode === "chapter" ? "chapter" : "episode", id: ep.id, revision: ep.chronicle.revision, hash: textHash(body) });
     }
     return { text: parts.join("\n"), refs };
   }
@@ -5693,16 +5822,12 @@ When current and historical facts differ, current facts take precedence.`;
     const prior = priorContextFor(data, start, state.chronicleDraft?.regenerateId || "");
     const messages = buildScenePrompt(lines, prior);
     const tokens = messages.reduce((sum, m) => sum + estimateTokens(m.content), 0);
-    const overlaps = rangeScenes(data).filter((ep) => ep.id !== state.chronicleDraft?.regenerateId && ep.chronicle.status !== "deleted")
-      .filter((ep) => { const loc = sceneLocation(ep); return (loc.status === "exact" || loc.status === "moved") && rangesOverlap(loc, { startIndex: start, endIndex: end }); });
+    const overlaps = activeNodeLocs(data).filter(({ ep, loc }) => ep.id !== state.chronicleDraft?.regenerateId && rangesOverlap(loc, { startIndex: start, endIndex: end })).map(({ ep }) => ep);
     return { start, end, count: end - start + 1, lines, prior, messages, tokens, overlaps, responses: completedResponses(rows, start, end), hidden: lines.filter((l) => l.hidden).length };
   }
   function nextChronicleStart(data) {
     let next = 0;
-    for (const ep of rangeScenes(data)) {
-      const loc = sceneLocation(ep);
-      if (ep.chronicle.status === "approved" && (loc.status === "exact" || loc.status === "moved")) next = Math.max(next, loc.endIndex + 1);
-    }
+    for (const { res, loc } of activeNodeLocs(data)) if (res.state === "approved") next = Math.max(next, loc.endIndex + 1);
     return Math.min(next, Math.max(0, state.chronicleRows.length - 1));
   }
   async function openChronicleRange({ regenerateId = "" } = {}) {
@@ -5738,10 +5863,7 @@ When current and historical facts differ, current facts take precedence.`;
     const d = state.chronicleDraft || {};
     const rows = state.chronicleRows;
     const covered = new Map();
-    for (const ep of rangeScenes()) {
-      const loc = sceneLocation(ep);
-      if (loc.status === "exact" || loc.status === "moved") for (let i = loc.startIndex; i <= loc.endIndex; i += 1) covered.set(i, ep.title);
-    }
+    for (const { ep, loc } of activeNodeLocs()) for (let i = loc.startIndex; i <= loc.endIndex; i += 1) covered.set(i, ep.title);
     const from = Math.max(0, Math.min(Number(state.chronicleListFrom) || 0, rows.length - 1));
     const list = rows.slice(from).map((row, j) => {
       const i = from + j;
@@ -5921,7 +6043,7 @@ When current and historical facts differ, current facts take precedence.`;
     const usage = rv.generation?.usage;
     const meta = [rv.generation?.model, usage ? `입력 ${usage.input.toLocaleString()} · 출력 ${usage.output.toLocaleString()} 토큰${usage.measured ? "" : " (추정)"}` : "", rv.contextRefs.length ? `참고 장면 ${rv.contextRefs.length}개` : ""].filter(Boolean).join(" · ");
     const target = rv.replacesEpisodeId ? rangeScenes().find((ep) => ep.id === rv.replacesEpisodeId) : null;
-    const overlaps = rangeScenes().filter((ep) => ep.id !== rv.replacesEpisodeId && ep.chronicle.status !== "deleted").filter((ep) => { const l = sceneLocation(ep); return (l.status === "exact" || l.status === "moved") && rangesOverlap(l, { startIndex: start, endIndex: end }); });
+    const overlaps = activeNodeLocs().filter(({ ep, loc: l }) => ep.id !== rv.replacesEpisodeId && rangesOverlap(l, { startIndex: start, endIndex: end })).map(({ ep }) => ep);
     const blocked = rv.status !== "ready" || !(loc.status === "exact" || loc.status === "moved");
     const many = state.chatCharacters.length >= 2;
     const factRow = (fact, j) => `<div class="mmc-chr-fact" data-chr-fact="${j}"><label class="mmc-chr-keep"><input type="checkbox" id="mmc-chr-fact-keep-${j}" ${fact.lines.length ? "checked" : ""}><span>포함</span></label><select id="mmc-chr-fact-status-${j}">${Object.entries(FACT_STATUS_LABEL).map(([id, label]) => `<option value="${id}" ${fact.status === id ? "selected" : ""}>${label}</option>`).join("")}</select><input id="mmc-chr-fact-text-${j}" value="${esc(fact.text)}" maxlength="300"><small class="${fact.lines.length ? "" : "mmc-scope-warn"}">${fact.lines.length ? `근거 ${fact.lines.map((n) => `#${n}`).join(", ")}` : "근거 줄 없음 · 확인 후 포함하세요"}</small>${many || fact.knownByIds.length ? scopeControl("chrdraft-fact", j, fact.knownByIds, { needsReview: c.scopeNeedsReview }) : ""}</div>`;
@@ -5991,8 +6113,9 @@ When current and historical facts differ, current facts take precedence.`;
     const data = await freshOwnedData();
     const list = safeArray(data.episodes).map(normalizeEpisode).filter(Boolean);
     const now = nowIso();
-    const overlaps = list.filter((ep) => !ep.replacedBy && ep.id !== rv.replacesEpisodeId && episodeMode(ep) === "range" && ep.chronicle.status !== "deleted")
-      .filter((ep) => { const l = locateRange(rows, ep.chronicle.range); return (l.status === "exact" || l.status === "moved") && rangesOverlap(l, loc); });
+    const overlapNodes = activeNodeLocs(data, rows).filter(({ ep, loc: l }) => ep.id !== rv.replacesEpisodeId && rangesOverlap(l, loc)).map(({ ep }) => ep);
+    if (overlapNodes.some((ep) => episodeMode(ep) === "chapter")) throw new Error("합본이 덮는 구간과 겹쳐요. 그 합본의 합치기를 취소하거나 구간을 나눠 주세요.");
+    const overlaps = list.filter((ep) => overlapNodes.some((row) => row.id === ep.id));
     if (overlaps.length && !replaceOverlaps) throw new Error("이미 기록된 구간과 겹쳐요. 교체에 체크하거나 구간을 나눠 다시 만들어 주세요.");
     const range = { ...rv.range, startIndex: loc.startIndex, endIndex: loc.endIndex };
     const fields = { title: draft.title, keywords: draft.keywords, background: draft.background, event: draft.event, facts: draft.facts, characters: draft.characters,
@@ -6043,21 +6166,6 @@ When current and historical facts differ, current facts take precedence.`;
     state.layer = "chronicle-range";
     render();
   }
-  async function verifyImportedScene(id) {
-    const rows = await loadChronicleRows();
-    const data = await freshOwnedData();
-    const list = safeArray(data.episodes).map(normalizeEpisode).filter(Boolean);
-    const ep = list.find((row) => row.id === id && episodeMode(row) === "range");
-    if (!ep) return;
-    const loc = locateRange(rows, ep.chronicle.range);
-    if (loc.status !== "exact" && loc.status !== "moved") throw new Error(loc.status === "ambiguous" ? "같은 원문이 여러 곳에 있어 구간을 확정할 수 없어요. 보류를 유지했어요." : "이 채팅에서 원문 구간을 찾지 못했어요. 보류를 유지했어요.");
-    if (!window.confirm(`원문 ${rangeLabel(loc.startIndex, loc.endIndex)}와 일치해요. 이 기록을 다시 주입 대상으로 돌릴까요?`)) return;
-    ep.chronicle = { ...ep.chronicle, status: "approved", invalidReason: "", range: { ...ep.chronicle.range, startIndex: loc.startIndex } };
-    data.episodes = list;
-    await persistData(data);
-    render();
-  }
-
   // ──────────────────────────────────────────────
   // v2.1 진행 흐름
   // 우산 돌려주기, 시험 준비, 계약 협상처럼 이어지는 일을 상태 기록과 함께 추적한다.
@@ -7308,7 +7416,7 @@ When current and historical facts differ, current facts take precedence.`;
       if (onScreen && onScreen !== state.selectedChatId && state.chats.some((chat) => chat.id === onScreen)) state.selectedChatId = onScreen;
       await loadCurrentChat();
       await loadConnections();
-      try { await loadChronicleRows(); } catch (error) { console.warn("[기억 보관함] scene rows", error); }
+      try { await loadChronicleRows(); await refreshChronicleValidity(); } catch (error) { console.warn("[기억 보관함] scene rows", error); }
       await checkNewSummaries({ refreshChat: false, refreshScenes: true, baselineIfUnknown: true, renderAfter: false });
       try { await refreshStaleRecords(); } catch (error) { console.warn("[기억 보관함] source check failed", error); }
       saveUiState();
@@ -8176,7 +8284,7 @@ When current and historical facts differ, current facts take precedence.`;
   }
 
   // 저장·적용 계열은 한 번에 하나만 실행한다. 동기화가 느릴 때 연타로 같은 기록이 두 번 생기지 않게 한다.
-  const LOCKED_ACTIONS = new Set(["chronicle-run", "chronicle-approve", "chronicle-discard", "chronicle-retry", "chronicle-verify", "save-thread", "delete-thread", "thread-status", "save-episode", "delete-episode", "stale-ack", "branch-hold-keep", "branch-hold-drop", "save-candidates", "apply-review", "apply-health", "save-element-candidates", "save-draft", "save-element", "delete-item", "delete-element", "promise-status", "toggle-promise-done", "toggle-anchor-active", "anchor-move", "save-settings", "save-element-settings", "import-legacy", "undo-auto-review", "restore-memory-backup", "confirm-quarantined-memory", "wiki-save", "wiki-candidate-save", "wiki-proposal-apply", "wiki-delete", "wiki-save-settings", "wiki-toggle", "parse-raw-recovery"]);
+  const LOCKED_ACTIONS = new Set(["chronicle-run", "chronicle-approve", "chronicle-discard", "chronicle-retry", "chronicle-reconfirm", "chronicle-restore", "chronicle-purge", "save-thread", "delete-thread", "thread-status", "save-episode", "delete-episode", "stale-ack", "branch-hold-keep", "branch-hold-drop", "save-candidates", "apply-review", "apply-health", "save-element-candidates", "save-draft", "save-element", "delete-item", "delete-element", "promise-status", "toggle-promise-done", "toggle-anchor-active", "anchor-move", "save-settings", "save-element-settings", "import-legacy", "undo-auto-review", "restore-memory-backup", "confirm-quarantined-memory", "wiki-save", "wiki-candidate-save", "wiki-proposal-apply", "wiki-delete", "wiki-save-settings", "wiki-toggle", "parse-raw-recovery"]);
   async function handleClick(event) {
     const actionEl = event.target.closest?.("[data-action]");
     if (!actionEl) return;
@@ -8265,7 +8373,7 @@ When current and historical facts differ, current facts take precedence.`;
       if (action === "tab") {
         const nextTab = String(actionEl.dataset.tab || "promise");
         state.activeTab = TAB_IDS.includes(nextTab) ? nextTab : "overview";
-        if (state.activeTab === "episode") { try { await loadChronicleRows(); } catch (error) { console.warn("[기억 보관함] scene rows", error); } }
+        if (state.activeTab === "episode") { try { await loadChronicleRows(); await refreshChronicleValidity(); } catch (error) { console.warn("[기억 보관함] scene rows", error); } }
         state.filter = "active";
         state.promisePane = "list";
         saveUiState(); render(); return;
@@ -8438,13 +8546,16 @@ When current and historical facts differ, current facts take precedence.`;
       if (action === "chronicle-approve") { await approveChronicleReview(String(actionEl.dataset.id || "")); return; }
       if (action === "chronicle-discard") { if (!window.confirm("이 후보를 버릴까요? 저장된 기억에는 영향이 없어요.")) return; await discardChronicleReview(String(actionEl.dataset.id || "")); return; }
       if (action === "chronicle-retry") { if (!window.confirm("이 후보를 버리고 같은 구간으로 새 요청을 준비할까요? 실행 전에 다시 확인해요.")) return; await retryChronicleReview(String(actionEl.dataset.id || "")); return; }
-      if (action === "chronicle-verify") { await verifyImportedScene(String(actionEl.dataset.id || "")); return; }
+      if (action === "chronicle-reconfirm") { await reconfirmChronicleNode(String(actionEl.dataset.id || "")); return; }
+      if (action === "chronicle-restore") { await restoreChronicleNode(String(actionEl.dataset.id || "")); return; }
+      if (action === "chronicle-purge") { await purgeChronicleNode(String(actionEl.dataset.id || "")); return; }
       if (action === "new-episode") { state.episodeDraft = { title: "" }; state.episodeDraftExtraFacts = 1; state.layer = "episode-editor"; render(); return; }
       if (action === "edit-episode") { const ep = episodeList().find((row) => row.id === actionEl.dataset.id); if (!ep) return; state.episodeDraft = JSON.parse(JSON.stringify(ep)); state.episodeDraftExtraFacts = 0; state.layer = "episode-editor"; render(); return; }
       if (action === "episode-add-fact") { captureEpisodeDraft(); state.episodeDraftExtraFacts = (state.episodeDraftExtraFacts || 0) + 1; render(); return; }
       if (action === "save-episode") { await saveEpisodeDraft(); return; }
       if (action === "delete-episode") {
         const id = String(actionEl.dataset.id || "");
+        if (episodeList().some((ep) => ep.id === id && episodeMode(ep) !== "legacy")) { await deleteChronicleNode(id); return; }
         if (!id || !window.confirm("이 장면 기억을 지울까요? 전용 로어북에서도 빠집니다.")) return;
         const data = await freshOwnedData();
         data.episodes = safeArray(data.episodes).map(normalizeEpisode).filter(Boolean).filter((ep) => ep.id !== id).map((ep) => (ep.replacedBy === id ? normalizeEpisode({ ...ep, replacedBy: "" }) : ep));

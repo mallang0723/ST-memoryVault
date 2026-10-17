@@ -517,3 +517,28 @@ test('a timed-out model request blocks duplicates until it settles and never ret
     f.ctx.generateRaw = async () => 'fresh response';
     assert.equal((await f.host.api('generate/raw', options)).content, 'fresh response');
 });
+
+test('generation-time guard drops chronicle scenes whose source changed even before re-sync', async () => {
+    const { buildRange, stMessageRow } = await import('../chronicle.js');
+    const f = fixture();
+    f.ctx.chat = [{ is_user: true, name: 'U', mes: 'one', send_date: 'a' }, { is_user: false, name: 'M', mes: 'two', send_date: 'b' }];
+    await f.host.beginSync(f.id);
+    const book = await f.host.api('lorebooks', { method: 'POST', body: { chatId: f.id, name: 'Vault', scanDepth: 4 } });
+    for (const id of ['ep-a', 'ep-b']) await f.host.api(`lorebooks/${book.id}/entries`, { method: 'POST', body: {
+        content: `scene ${id}`, tag: 'memory-cabinet-episode', keys: ['key'], enabled: true, dynamicState: { memoryCabinetEpisodeId: id },
+    } });
+    await f.host.commitSync(f.id);
+    f.host.endSync();
+    const range = buildRange(f.ctx.chat.map(stMessageRow), 0, 1);
+    const episodes = [
+        { id: 'ep-a', title: 'A', chronicle: { mode: 'range', status: 'approved', revision: 1, range } },
+        { id: 'ep-b', title: 'B', chronicle: { mode: 'range', status: 'approved', revision: 1, range, contextRefs: [{ id: 'ep-a', revision: 1 }] } },
+    ];
+    await f.host.api(`chats/${encodeURIComponent(f.id)}/metadata`, { method: 'PATCH', body: { memoryCabinetV1: { ownerChatId: f.id, lorebookId: book.id, items: [], episodes } } });
+    const lists = { chatLore: [], globalLore: [] };
+    await f.host.inject(lists);
+    assert.deepEqual(lists.chatLore.map(e => e.content).sort(), ['scene ep-a', 'scene ep-b']);
+    f.ctx.chat[1].mes = 'edited';
+    await f.host.inject(lists);
+    assert.deepEqual(lists.chatLore, [], 'edited source and its dependent delta are both withheld');
+});

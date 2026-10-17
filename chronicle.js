@@ -46,7 +46,9 @@ export const MAX_CONTEXT_REFS = 12;
 export const RANGE_SUMMARY_MAX = 2000;
 // Whole chronicle footprint inside chat metadata (range scenes + reviews).
 export const MAX_CHRONICLE_BYTES = 2 * 1024 * 1024;
-export const SCENE_STATUSES = ['approved', 'stale', 'held', 'deleted'];
+export const SCENE_STATUSES = ['approved', 'stale', 'held', 'deleted', 'undone'];
+export const MAX_MERGE_CHILDREN = 24;
+export const MERGE_PROMPT_VERSION = 'chapter-merge-v1';
 export const DEFAULT_SETTINGS = Object.freeze({
     connectionId: 'current', sceneMaxTokens: 1200, reviewBeforeApply: true,
     autoEnabled: false, autoEveryResponses: 10, autoBuffer: 2,
@@ -124,37 +126,55 @@ export function normalizeContextRefs(raw) {
 }
 
 /**
- * episode.chronicle for range scenes. Legacy episodes have no field (mode legacy).
- * An unverifiable range is kept but held, never silently repaired.
+ * episode.chronicle for range scenes (mode range) and merged chapters (mode chapter).
+ * Legacy episodes have no field. An unverifiable record is kept but held, never repaired.
  */
+export function normalizeChildRefs(raw) {
+    return (Array.isArray(raw) ? raw : []).filter(rec).slice(0, MAX_MERGE_CHILDREN)
+        .map(r => ({ id: str(r.id, 120), revision: int(r.revision, 1, 1e6, 1) })).filter(r => r.id);
+}
+function normalizePrevious(raw) {
+    return (Array.isArray(raw) ? raw : []).filter(rec).slice(-MAX_PREVIOUS_VERSIONS).map(p => ({
+        revision: int(p.revision, 1, 1e6, 1), savedAt: str(p.savedAt, 40), reason: str(p.reason, 40),
+        title: str(p.title, 120), summary: str(p.summary, RANGE_SUMMARY_MAX), keywords: (Array.isArray(p.keywords) ? p.keywords : []).map(k => str(k, 60)).slice(0, 8),
+    }));
+}
 export function normalizeEpisodeChronicle(raw) {
-    if (!rec(raw) || raw.mode !== 'range') return null;
-    const range = normalizeRange(raw.range);
+    if (!rec(raw) || !['range', 'chapter'].includes(raw.mode)) return null;
     let status = SCENE_STATUSES.includes(raw.status) ? raw.status : 'held';
     let invalidReason = str(raw.invalidReason, 200);
+    const common = {
+        revision: int(raw.revision, 1, 1e6, 1), contextRefs: normalizeContextRefs(raw.contextRefs), generation: normalizeGeneration(raw.generation),
+        approvedAt: str(raw.approvedAt, 40), previous: normalizePrevious(raw.previous),
+        archivedBy: str(raw.archivedBy, 120), archivedAt: str(raw.archivedAt, 40),
+        deletedAt: str(raw.deletedAt, 40), statusBeforeDelete: SCENE_STATUSES.includes(raw.statusBeforeDelete) && raw.statusBeforeDelete !== 'deleted' ? raw.statusBeforeDelete : '',
+    };
+    if (raw.mode === 'chapter') {
+        const childRefs = normalizeChildRefs(raw.childRefs);
+        if (childRefs.length < 2 || new Set(childRefs.map(c => c.id)).size !== childRefs.length) { status = status === 'undone' ? status : 'held'; invalidReason = invalidReason || 'children-invalid'; }
+        return { mode: 'chapter', level: int(raw.level, 1, 64, 1), status, invalidReason, childRefs, mergedAt: str(raw.mergedAt, 40), undoneAt: str(raw.undoneAt, 40), ...common };
+    }
+    const range = normalizeRange(raw.range);
     if (!range) { status = 'held'; invalidReason = invalidReason || 'range-invalid'; }
     return {
-        mode: 'range', revision: int(raw.revision, 1, 1e6, 1), status,
+        mode: 'range', status, invalidReason,
         range: range || (rec(raw.range) ? { startIndex: int(raw.range.startIndex, 0, 1e7, 0), count: 0, fingerprints: [], rangeHash: '' } : null),
-        contextRefs: normalizeContextRefs(raw.contextRefs), generation: normalizeGeneration(raw.generation),
-        injectionPolicy: raw.injectionPolicy === 'archived' ? 'archived' : 'keyword',
-        invalidReason, approvedAt: str(raw.approvedAt, 40),
-        previous: (Array.isArray(raw.previous) ? raw.previous : []).filter(rec).slice(-MAX_PREVIOUS_VERSIONS).map(p => ({
-            revision: int(p.revision, 1, 1e6, 1), savedAt: str(p.savedAt, 40), reason: str(p.reason, 40),
-            title: str(p.title, 120), summary: str(p.summary, RANGE_SUMMARY_MAX), keywords: (Array.isArray(p.keywords) ? p.keywords : []).map(k => str(k, 60)).slice(0, 8),
-        })),
+        injectionPolicy: 'keyword', ...common,
     };
 }
 
-/** Pending scene candidate produced by one isolated call (or a failed/held call). */
+/** Pending candidate from one isolated call: a scene (range) or a merge (children). */
 export function normalizeReview(raw) {
     if (!rec(raw)) return null;
-    const range = normalizeRange(raw.range);
-    if (!range) return null;
+    const kind = raw.kind === 'merge' ? 'merge' : 'scene';
+    const range = kind === 'scene' ? normalizeRange(raw.range) : null;
+    const childRefs = kind === 'merge' ? normalizeChildRefs(raw.childRefs) : [];
+    if (kind === 'scene' ? !range : childRefs.length < 2) return null;
     const status = ['ready', 'held', 'failed'].includes(raw.status) ? raw.status : 'held';
     return {
-        id: str(raw.id, 80) || `chr_${Date.now().toString(36)}`, kind: 'scene', status, reason: str(raw.reason, 300),
-        range, replacesEpisodeId: str(raw.replacesEpisodeId, 120), contextRefs: normalizeContextRefs(raw.contextRefs),
+        id: str(raw.id, 80) || `chr_${Date.now().toString(36)}`, kind, status, reason: str(raw.reason, 300),
+        ...(kind === 'scene' ? { range } : { childRefs, auto: raw.auto === true, inputHash: str(raw.inputHash, 40) }),
+        replacesEpisodeId: str(raw.replacesEpisodeId, 120), contextRefs: normalizeContextRefs(raw.contextRefs),
         generation: normalizeGeneration(raw.generation), candidate: rec(raw.candidate) ? structuredClone(raw.candidate) : null,
         rawText: str(raw.rawText, 20000), createdAt: str(raw.createdAt, 40),
     };
@@ -182,8 +202,10 @@ export function normalizeChronicleState(raw) {
     return {
         schemaVersion: SCHEMA_VERSION, settings: normalizeSettings(r.settings),
         reviews: (Array.isArray(r.reviews) ? r.reviews : []).map(normalizeReview).filter(Boolean).slice(-MAX_REVIEWS),
-        // Recursive chapters arrive in a later phase; keep records verbatim until then.
+        // Reserved and kept verbatim. Merged chapters live in episodes[] (chronicle.mode 'chapter').
         chapters: (Array.isArray(r.chapters) ? r.chapters : []).filter(rec).map(c => structuredClone(c)),
+        // Input hashes of merges the user just undid: auto-merge must not redo them.
+        suppressedMerges: (Array.isArray(r.suppressedMerges) ? r.suppressedMerges : []).map(h => str(h, 40)).filter(Boolean).slice(-50),
     };
 }
 
@@ -213,4 +235,215 @@ export function holdImportedChronicle(data) {
 export function rangeAfterCut(chronicle, cutIndex) {
     const r = normalizeRange(chronicle?.range);
     return !r || !Number.isInteger(cutIndex) || r.endIndex > cutIndex;
+}
+
+// ── Validity, dependencies and the active frontier (phases D/F) ──
+// Effective states: approved (injectable), stale, held, deleted, undone, archived.
+
+function chronicleNodes(episodes) {
+    const map = new Map();
+    for (const ep of Array.isArray(episodes) ? episodes : []) {
+        if (!rec(ep) || ep.replacedBy) continue;
+        const c = normalizeEpisodeChronicle(ep.chronicle);
+        if (c && ep.id) map.set(String(ep.id), { ep, c });
+    }
+    return map;
+}
+
+/**
+ * Evaluates every chronicle node against the current messages.
+ * Returns Map id -> { state, reason, loc, own } where `own` ignores archiving.
+ */
+export function evaluateChronicle(episodes, rows) {
+    const nodes = chronicleNodes(episodes);
+    const memo = new Map();
+    const visiting = new Set();
+    const own = (id) => {
+        if (memo.has(id)) return memo.get(id);
+        const node = nodes.get(id);
+        if (!node) return { state: 'missing', reason: 'missing' };
+        if (visiting.has(id)) return { state: 'held', reason: 'cycle' };
+        visiting.add(id);
+        const { c } = node;
+        let out;
+        if (c.status === 'deleted' || c.status === 'undone') out = { state: c.status, reason: c.invalidReason };
+        else if (c.mode === 'range') {
+            const loc = c.range?.count ? locateRange(rows, c.range) : { status: 'invalid' };
+            if (c.status === 'held') out = { state: 'held', reason: c.invalidReason || 'held', loc };
+            else if (loc.status === 'changed' || loc.status === 'invalid') out = { state: 'stale', reason: 'source-changed', loc };
+            else if (loc.status === 'ambiguous') out = { state: 'held', reason: 'ambiguous', loc };
+            else out = { state: c.status === 'stale' ? 'stale' : 'approved', reason: c.status === 'stale' ? c.invalidReason || 'stale' : '', loc };
+        } else {
+            const kids = c.childRefs.map(ref => ({ ref, node: nodes.get(ref.id), res: own(ref.id) }));
+            const locs = kids.map(k => k.res.loc).filter(Boolean);
+            const located = locs.length === kids.length && locs.every(l => l.status === 'exact' || l.status === 'moved' || l.status === 'merged');
+            const loc = located ? { status: 'merged', startIndex: Math.min(...locs.map(l => l.startIndex)), endIndex: Math.max(...locs.map(l => l.endIndex)) } : { status: 'changed' };
+            const childBad = kids.some(k => !k.node || ['stale', 'held', 'deleted', 'undone', 'missing'].includes(k.res.state));
+            const childEdited = kids.some(k => k.node && k.node.c.revision !== k.ref.revision);
+            if (c.status === 'held') out = { state: 'held', reason: c.invalidReason || 'held', loc };
+            else if (childBad || childEdited || !located) out = { state: 'stale', reason: 'child-changed', loc };
+            else out = { state: c.status === 'stale' ? 'stale' : 'approved', reason: c.status === 'stale' ? c.invalidReason || 'stale' : '', loc };
+        }
+        // A delta written against an earlier record depends on that exact revision.
+        if (out.state === 'approved') {
+            for (const ref of c.contextRefs) {
+                const target = nodes.get(ref.id);
+                const res = own(ref.id);
+                if (!target || target.c.revision !== ref.revision || !['approved'].includes(res.state)) { out = { ...out, state: 'stale', reason: 'dependency-changed' }; break; }
+            }
+        }
+        visiting.delete(id);
+        memo.set(id, out);
+        return out;
+    };
+    const result = new Map();
+    for (const [id, { c }] of nodes) {
+        const base = own(id);
+        let state = base.state;
+        // Archived under a live (not undone/deleted) parent: kept, never injected.
+        if (c.archivedBy && nodes.has(c.archivedBy) && !['undone', 'deleted'].includes(nodes.get(c.archivedBy).c.status) && state !== 'deleted') state = 'archived';
+        result.set(id, { ...base, state, own: base.state });
+    }
+    return result;
+}
+
+/** Chronicle node ids that must not be injected now (generation-time guard). */
+export function blockedChronicleIds(episodes, rows) {
+    const blocked = new Set();
+    for (const [id, res] of evaluateChronicle(episodes, rows)) if (res.state !== 'approved') blocked.add(id);
+    return blocked;
+}
+
+/** Active frontier: not archived/deleted/undone, ordered by current coverage. */
+export function chronicleFrontier(episodes, rows, evaluation = evaluateChronicle(episodes, rows)) {
+    const nodes = chronicleNodes(episodes);
+    return [...evaluation].filter(([, res]) => !['archived', 'deleted', 'undone'].includes(res.state))
+        .map(([id, res]) => ({ id, ep: nodes.get(id).ep, c: nodes.get(id).c, res }))
+        .sort((a, b) => (a.res.loc?.startIndex ?? 1e9) - (b.res.loc?.startIndex ?? 1e9));
+}
+
+/** Leaf range ids under a node (a range node is its own leaf). */
+export function leafIds(episodes, id) {
+    const nodes = chronicleNodes(episodes);
+    const out = [];
+    const walk = (nid, depth) => {
+        const n = nodes.get(nid);
+        if (!n || depth > 64) return;
+        if (n.c.mode === 'range') out.push(nid); else n.c.childRefs.forEach(r => walk(r.id, depth + 1));
+    };
+    walk(id, 0);
+    return out;
+}
+
+/** Leaf-coverage overlap between injected nodes; must be empty. */
+export function injectedCoverageOverlap(episodes, rows) {
+    const injected = [...evaluateChronicle(episodes, rows)].filter(([, r]) => r.state === 'approved').map(([id]) => id);
+    const seen = new Map();
+    const overlaps = [];
+    for (const id of injected) for (const leaf of leafIds(episodes, id)) {
+        if (seen.has(leaf)) overlaps.push([seen.get(leaf), id, leaf]); else seen.set(leaf, id);
+    }
+    return overlaps;
+}
+
+export function scopeSignature(ep) {
+    const ids = (v) => (Array.isArray(v) ? v.map(String).sort() : []);
+    const parts = [ids(ep?.event?.knownBy), ...(Array.isArray(ep?.facts) ? ep.facts : []).map(f => ids(f?.knownBy))].filter(list => list.length).map(list => list.join(','));
+    return [...new Set(parts)].sort().join('|');
+}
+export function mergeInputHash(nodes) {
+    return strongHash(nodes.map(n => `${n.ep.id}@${n.c.revision}`).join(';'));
+}
+
+/**
+ * Checks a merge selection: 2+ active, approved, contiguous, non-overlapping
+ * frontier nodes with one shared knowledge scope.
+ */
+export function validateMerge(episodes, rows, ids) {
+    const evaluation = evaluateChronicle(episodes, rows);
+    const frontier = chronicleFrontier(episodes, rows, evaluation);
+    const wanted = new Set(ids.map(String));
+    const nodes = frontier.filter(n => wanted.has(n.id));
+    if (wanted.size < 2) return { ok: false, error: '합칠 구간을 두 개 이상 고르세요.' };
+    if (wanted.size > MAX_MERGE_CHILDREN) return { ok: false, error: `한 번에 ${MAX_MERGE_CHILDREN}개까지 합칠 수 있어요.` };
+    if (nodes.length !== wanted.size) return { ok: false, error: '보관된 기록이나 조상·자손이 섞였어요. 활성 구간만 고르세요.' };
+    const bad = nodes.find(n => n.res.state !== 'approved');
+    if (bad) return { ok: false, error: `'${bad.ep.title}'은 갱신이 필요하거나 보류된 기록이에요. 먼저 고친 뒤 합쳐 주세요.` };
+    for (let i = 1; i < nodes.length; i++) {
+        const prev = nodes[i - 1].res.loc, cur = nodes[i].res.loc;
+        if (cur.startIndex <= prev.endIndex) return { ok: false, error: '고른 구간이 서로 겹쳐요.' };
+        if (cur.startIndex !== prev.endIndex + 1) return { ok: false, error: '고른 구간 사이에 기록되지 않은 메시지가 있어요. 이어진 구간만 합칠 수 있어요.' };
+    }
+    const scopes = new Set(nodes.map(n => scopeSignature(n.ep)));
+    if (scopes.size > 1) return { ok: false, error: '아는 인물 범위가 다른 기록은 함께 합치지 않아요.' };
+    const level = 1 + Math.max(...nodes.map(n => (n.c.mode === 'chapter' ? n.c.level : 0)));
+    return { ok: true, nodes, level, restricted: [...scopes][0] !== '', inputHash: mergeInputHash(nodes),
+        coverage: { startIndex: nodes[0].res.loc.startIndex, endIndex: nodes[nodes.length - 1].res.loc.endIndex } };
+}
+
+/**
+ * Auto-merge plan: once the eligible public frontier reaches the count and/or
+ * token threshold, merge the oldest contiguous run (at least 2), keeping the
+ * newest node unmerged. Skips nodes with pending work and just-undone inputs.
+ */
+export function planAutoMerge(episodes, rows, settings, { pendingIds = new Set(), suppressed = [], estimate = () => 0 } = {}) {
+    if (!settings.autoMergeEnabled) return null;
+    const frontier = chronicleFrontier(episodes, rows).filter(n => n.res.state === 'approved' && scopeSignature(n.ep) === '' && !pendingIds.has(n.id));
+    if (frontier.length < 3) return null;
+    const tokens = frontier.reduce((sum, n) => sum + estimate(n.ep), 0);
+    const byCount = frontier.length >= settings.mergeCountThreshold;
+    const byTokens = tokens >= settings.mergeTokenThreshold;
+    if (settings.mergeTriggerMode === 'and' ? !(byCount && byTokens) : !(byCount || byTokens)) return null;
+    const pool = frontier.slice(0, -1);
+    for (let start = 0; start < pool.length - 1; start++) {
+        const run = [pool[start]];
+        for (let i = start + 1; i < pool.length && run.length < Math.max(2, settings.mergeCountThreshold); i++) {
+            if (pool[i].res.loc.startIndex !== run[run.length - 1].res.loc.endIndex + 1) break;
+            run.push(pool[i]);
+        }
+        if (run.length < 2) continue;
+        const hash = mergeInputHash(run);
+        if (suppressed.includes(hash)) continue;
+        return { ids: run.map(n => n.id), inputHash: hash, tokens };
+    }
+    return null;
+}
+
+/** Applies an approved merge in one step: parent added, direct children archived. */
+export function applyMerge(episodes, parent, childIds, now) {
+    const ids = new Set(childIds);
+    for (const ep of episodes) {
+        if (!ids.has(ep.id)) continue;
+        if (ep.chronicle?.archivedBy) throw new Error('이미 다른 합본에 들어간 기록이 있어요.');
+        ep.chronicle = { ...ep.chronicle, archivedBy: parent.id, archivedAt: now };
+    }
+    episodes.push(parent);
+    return episodes;
+}
+
+/**
+ * Undoes a merge without any model call: the parent becomes inactive history
+ * and its direct children become active again. Active ancestors are undone first.
+ */
+export function undoMerge(episodes, chapterId, now) {
+    const byId = new Map(episodes.filter(rec).map(ep => [String(ep.id), ep]));
+    const chain = [];
+    let cur = byId.get(chapterId);
+    const seen = new Set();
+    while (cur && !seen.has(cur.id)) {
+        seen.add(cur.id);
+        if (cur.chronicle?.mode !== 'chapter') throw new Error('합본만 합치기를 취소할 수 있어요.');
+        chain.unshift(cur);
+        const parentId = cur.chronicle.archivedBy;
+        const parent = parentId ? byId.get(parentId) : null;
+        cur = parent && !['undone', 'deleted'].includes(parent.chronicle?.status) ? parent : null;
+    }
+    for (const node of chain) {
+        node.chronicle = { ...node.chronicle, status: 'undone', undoneAt: now, archivedBy: '', archivedAt: '' };
+        for (const ref of node.chronicle.childRefs || []) {
+            const child = byId.get(ref.id);
+            if (child && child.chronicle?.archivedBy === node.id) child.chronicle = { ...child.chronicle, archivedBy: '', archivedAt: '' };
+        }
+    }
+    return chain.map(n => n.id);
 }
