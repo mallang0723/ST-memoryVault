@@ -200,3 +200,23 @@ test('dispose before dispatch prevents the network call', async () => {
     await assert.rejects(pending);
     assert.equal(f.requests.length, 0);
 });
+
+test('a saved profile with an explicitly chosen reverse proxy is accepted; the extension passes no proxy fields itself', async () => {
+    const f = fixture();
+    f.ctx.extensionSettings.connectionManager.profiles.push({ id: 'px', name: 'Proxy profile', mode: 'cc', api: 'openai', model: 'proxy-model', proxy: 'My proxy' });
+    f.options.body.connectionId = 'profile:px';
+    const rows = listSummaryConnections(f.ctx);
+    assert.equal(rows.find(r => r.id === 'profile:px').supported, true);
+    assert.doesNotMatch(JSON.stringify(rows), /My proxy/);
+    await f.host.api('generate/isolated', f.options);
+    const [id, sent, , custom, override] = f.profileCalls[0];
+    assert.equal(id, 'px');
+    assert.deepEqual(sent, messages);
+    assert.equal(custom.includePreset, false);
+    assert.deepEqual(override, { temperature: 0.2 }, 'no proxy, password or other fields added by the extension');
+    // The current-connection proxy path stays refused.
+    const g = fixture();
+    Object.assign(g.ctx.chatCompletionSettings, { chat_completion_source: 'openai', reverse_proxy: 'https://proxy.invalid' });
+    await assert.rejects(g.host.api('generate/isolated', g.options), /프록시/);
+    assert.equal(g.requests.length, 0);
+});

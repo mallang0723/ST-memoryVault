@@ -33,7 +33,8 @@ await page.route('**/*', route => {
         if (u.pathname !== '/api/backends/chat-completions/generate') { blocked.push(u.pathname); return route.abort(); }
         const body = JSON.parse(request.postData() || '{}');
         // Only forward requests whose final destination is the local fake.
-        if (body.chat_completion_source !== 'custom' || (body.custom_url && body.custom_url !== providerUrl)) { blocked.push(`${u.pathname}:${body.chat_completion_source}`); return route.abort(); }
+        const toFake = (body.chat_completion_source === 'custom' && body.custom_url === providerUrl) || body.reverse_proxy === providerUrl;
+        if (!toFake) { blocked.push(`${u.pathname}:${body.chat_completion_source}`); return route.abort(); }
         forwarded.push(body);
     }
     return route.continue();
@@ -77,6 +78,11 @@ try {
         extension_settings.connectionManager ||= { profiles: [] };
         extension_settings.connectionManager.profiles = (extension_settings.connectionManager.profiles || []).filter(p => p.id !== 'qa-summary');
         extension_settings.connectionManager.profiles.push({ id: 'qa-summary', name: 'QA summary', mode: 'cc', api: 'custom', model: 'profile-model', 'api-url': providerUrl, preset: 'Default' });
+        // A profile whose user explicitly chose a reverse proxy (allowed for saved profiles).
+        const { proxies } = await import('/scripts/openai.js');
+        if (!proxies.some(p => p.name === 'QA proxy')) proxies.push({ name: 'QA proxy', url: providerUrl, password: 'PROXY_PASSWORD_CANARY' });
+        extension_settings.connectionManager.profiles = extension_settings.connectionManager.profiles.filter(p => p.id !== 'qa-proxy');
+        extension_settings.connectionManager.profiles.push({ id: 'qa-proxy', name: 'QA proxy profile', mode: 'cc', api: 'openai', model: 'proxy-model', proxy: 'QA proxy', preset: 'Default' });
         const beforeSettings = JSON.stringify(oai_settings);
         let hooks = 0;
         const poison = event => { hooks++; (event.chat || []).push({ role: 'system', content: 'RP_HOOK_POISON' }); };
@@ -93,7 +99,8 @@ try {
             const connections = await host.api('chronicle/connections');
             const current = await host.api('generate/isolated', { method: 'POST', body: { ...body, connectionId: 'current' } });
             const profile = await host.api('generate/isolated', { method: 'POST', body: { ...body, connectionId: 'profile:qa-summary' } });
-            return { connections, current, profile, hooks, messages, settingsUnchanged: beforeSettings === JSON.stringify(oai_settings),
+            const proxied = await host.api('generate/isolated', { method: 'POST', body: { ...body, connectionId: 'profile:qa-proxy' } });
+            return { connections, current, profile, proxied, hooks, messages, settingsUnchanged: beforeSettings === JSON.stringify(oai_settings),
                 chatUnchanged: original === JSON.stringify({ chat: ctx.chat, metadata: ctx.chatMetadata }) };
         } finally {
             ctx.eventSource.removeListener(ctx.eventTypes.CHAT_COMPLETION_PROMPT_READY, poison);
@@ -101,7 +108,7 @@ try {
             host.dispose();
         }
     }, providerUrl);
-    assert.equal(captures.length, 2, JSON.stringify(captures));
+    assert.equal(captures.length, 3, JSON.stringify(captures));
     for (const capture of captures) {
         assert.equal(capture.path, '/v1/chat/completions');
         assert.deepEqual(capture.body.messages, result.messages);
@@ -113,7 +120,10 @@ try {
     }
     assert.equal(captures[0].body.model, 'fake-summary');
     assert.equal(captures[1].body.model, 'profile-model');
-    assert.doesNotMatch(JSON.stringify(captures), /POISON|CANARY|QA summary|Default/);
+    assert.equal(captures[2].body.model, 'proxy-model', 'proxied profile reached the fake through its reverse proxy');
+    assert.equal(result.proxied.connection.id, 'profile:qa-proxy');
+    assert.doesNotMatch(JSON.stringify(captures), /POISON|CANARY|QA summary|QA proxy|Default/);
+    assert.doesNotMatch(JSON.stringify(result.connections), /QA proxy"|PROXY_PASSWORD/);
     assert.equal(result.hooks, 0);
     assert.equal(result.settingsUnchanged, true);
     assert.equal(result.chatUnchanged, true);
