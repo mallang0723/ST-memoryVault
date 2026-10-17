@@ -201,3 +201,8 @@ test('restricted records are never auto-merged and a restricted chapter cannot w
     await r.c.approveMergeReview(review, draft);
     assert.ok(r.c.state.currentData.episodes.some(e => e.chronicle?.mode === 'chapter'));
 });
+
+test('capacity guard counts merged chapters too', () => {
+    const big = { episodes: Array.from({ length: 40 }, (_, i) => ({ ...chapter(`c${i}`, [scene('A', 0, 4), scene('B', 5, 9)]), event: { summary: 'x'.repeat(60000) } })), chronicle: {} };
+    assert.throws(() => chronicleLib.assertChronicleSize(big), /2 MiB/);
+});

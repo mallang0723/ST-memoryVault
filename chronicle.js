@@ -211,7 +211,7 @@ export function normalizeChronicleState(raw) {
 
 /** Bytes of chronicle data (state + range scenes) as stored in chat metadata. */
 export function chronicleBytes(data) {
-    const scenes = (Array.isArray(data?.episodes) ? data.episodes : []).filter(ep => ep?.chronicle?.mode === 'range');
+    const scenes = (Array.isArray(data?.episodes) ? data.episodes : []).filter(ep => ['range', 'chapter'].includes(ep?.chronicle?.mode));
     return new TextEncoder().encode(JSON.stringify([data?.chronicle || null, scenes])).length;
 }
 export function assertChronicleSize(data) {
