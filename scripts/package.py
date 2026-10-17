@@ -6,7 +6,7 @@ import json
 
 root = Path(__file__).resolve().parent.parent
 version = json.loads((root / 'manifest.json').read_text())['version']
-files = ['manifest.json', 'index.js', 'extension.js', 'extension.css', 'host.js', 'links.js',
+files = ['manifest.json', 'index.js', 'extension.js', 'extension.css', 'host.js', 'isolated-generation.js', 'chronicle.js', 'links.js',
          'world-info.js', 'migration.js', 'README.md', 'CHANGELOG.md', 'LICENSE', 'NOTICE.md',
          'docs/MIGRATION.md', 'docs/EMBEDDINGS.md', 'docs/embedding-visual-guide.html']
 output = root / 'dist'

@@ -1,5 +1,7 @@
 import { DATA_KEY } from './migration.js';
 import { WORLD_KEY, compileWorldInfo, compileLegacyWorldInfo, removeManagedEntries } from './world-info.js';
+import { generateIsolated, listSummaryConnections } from './isolated-generation.js';
+import { stMessageRow, sliceHash } from './chronicle.js';
 
 export const HOST_KEY = 'memoryVaultHost';
 export const SETTINGS_KEY = 'memoryVault';
@@ -66,6 +68,7 @@ export function createHost({ getContext, fetchImpl = globalThis.fetch, worldInfo
     const cleanup = [];
     let transaction = null;
     let rawGeneration = null;
+    let disposed = false;
     let epoch = 0;
     let timer;
     let lastSummary = '';
@@ -304,20 +307,37 @@ export function createHost({ getContext, fetchImpl = globalThis.fetch, worldInfo
 
     function endSync() { transaction = null; }
 
-    async function generate(body, timeoutMs) {
+    function scopeSignature(ctx) { return JSON.stringify(characterScope(ctx).characters.map(c => c.avatar)); }
+    function guardHash(ctx, guard) {
+        return sliceHash((ctx.chat || []).map(stMessageRow), Number(guard.startIndex), Number(guard.endIndex));
+    }
+
+    async function generate(body, timeoutMs, isolated = false) {
+        if (disposed) throw new Error('종료된 보관함에서는 모델을 호출할 수 없습니다.');
         const ctx = getContext();
         const id = chatIdentity(ctx);
         assertChat(id);
-        if (body.connectionId !== 'sillytavern-current') throw new Error('모델 설정에서 SillyTavern 현재 연결을 선택해 주세요.');
+        if (!isolated && body.connectionId !== 'sillytavern-current') throw new Error('모델 설정에서 SillyTavern 현재 연결을 선택해 주세요.');
         if (rawGeneration) throw new Error('이전 보관함 모델 요청이 아직 진행 중입니다. 완료 후 다시 시도해 주세요.');
         if (isGenerating()) throw new Error('채팅 응답 생성이 끝난 뒤 실행해 주세요.');
         if (ctx.streamingProcessor && !ctx.streamingProcessor.isFinished) throw new Error('채팅 응답 생성이 끝난 뒤 실행해 주세요.');
-        if (!ctx.onlineStatus || ctx.onlineStatus === 'no_connection') throw new Error('SillyTavern API 연결을 먼저 설정해 주세요. 수동 편집은 연결 없이 사용할 수 있습니다.');
+        if (!isolated && (!ctx.onlineStatus || ctx.onlineStatus === 'no_connection')) throw new Error('SillyTavern API 연결을 먼저 설정해 주세요. 수동 편집은 연결 없이 사용할 수 있습니다.');
+        const guard = isolated && body.guard ? { startIndex: Number(body.guard.startIndex), endIndex: Number(body.guard.endIndex), rangeHash: String(body.guard.rangeHash || '') } : null;
+        if (guard && (!guard.rangeHash || guardHash(ctx, guard) !== guard.rangeHash)) throw new Error('선택한 구간의 원문이 바뀌었습니다. 구간을 다시 확인해 주세요. 모델을 호출하지 않았습니다.');
+        const scopeBefore = scopeSignature(ctx);
         const startedEpoch = epoch;
-        const pending = Promise.resolve().then(() => ctx.generateRaw({
-            prompt: clone(body.messages || []), responseLength: body.parameters?.maxTokens || 1800,
-            trimNames: false,
-        }));
+        const pending = Promise.resolve().then(() => {
+            if (disposed || startedEpoch !== epoch) throw new Error('요청 전 채팅이 바뀌어 모델을 호출하지 않았습니다.');
+            assertChat(id);
+            if (isolated) return generateIsolated({
+                ctx: getContext(), connectionId: String(body.connectionId || ''), messages: clone(body.messages),
+                maxTokens: body.parameters?.maxTokens ?? 1200, fetchImpl,
+            });
+            return ctx.generateRaw({
+                prompt: clone(body.messages || []), responseLength: body.parameters?.maxTokens || 1800,
+                trimNames: false,
+            });
+        });
         rawGeneration = pending;
         pending.then(() => { if (rawGeneration === pending) rawGeneration = null; }, () => { if (rawGeneration === pending) rawGeneration = null; });
         let timeout;
@@ -325,9 +345,14 @@ export function createHost({ getContext, fetchImpl = globalThis.fetch, worldInfo
             const result = await Promise.race([pending, new Promise((_, reject) => {
                 timeout = setTimeout(() => reject(new Error('모델 응답 대기 시간이 초과됐습니다. 늦은 응답은 적용하지 않습니다. 서버 요청이 끝날 때까지 재요청은 잠깁니다.')), timeoutMs || 180000);
             })]);
+            if (disposed) throw new Error('보관함이 종료되어 결과를 적용하지 않았습니다.');
             assertChat(id);
             if (startedEpoch !== epoch) throw new Error('모델 요청 중 채팅을 전환해 결과를 적용하지 않았습니다.');
-            return { content: result };
+            if (!isolated) return { content: result };
+            // A changed source keeps the paid result visible but marks it unusable.
+            const now = getContext();
+            const sourceChanged = (guard && guardHash(now, guard) !== guard.rangeHash) || scopeSignature(now) !== scopeBefore;
+            return { ...result, sourceChanged: !!sourceChanged };
         } finally { clearTimeout(timeout); }
     }
 
@@ -348,11 +373,7 @@ export function createHost({ getContext, fetchImpl = globalThis.fetch, worldInfo
             const ctx = assertChat(parts[1]);
             if (parts[2] === 'metadata' && method === 'PATCH') return saveMetadata(parts[1], body);
             if (parts[2] === 'messages' && method === 'GET') {
-                const messages = ctx.chat.map((m, i) => ({
-                    id: `st-message:${i}`, role: m.is_system ? 'system' : m.is_user ? 'user' : 'assistant',
-                    content: String(m.mes || ''), createdAt: String(m.send_date || ''), name: m.name,
-                    activeSwipeIndex: Number(m.swipe_id) || 0,
-                }));
+                const messages = ctx.chat.map(stMessageRow);
                 const limit = Number(url.searchParams.get('limit'));
                 return limit > 0 ? messages.slice(-limit) : messages;
             }
@@ -363,6 +384,8 @@ export function createHost({ getContext, fetchImpl = globalThis.fetch, worldInfo
         }];
         if (parts[0] === 'agents' && method === 'GET') return [];
         if (parts.join('/') === 'generate/raw' && method === 'POST') return generate(body, options.timeoutMs);
+        if (parts.join('/') === 'generate/isolated' && method === 'POST') return generate(body, options.timeoutMs, true);
+        if (parts.join('/') === 'chronicle/connections' && method === 'GET') return listSummaryConnections(getContext());
         if (parts[0] === 'lorebooks') {
             if (parts.length === 1 && method === 'GET') {
                 const chatId = url.searchParams.get('chatId');
@@ -486,6 +509,6 @@ export function createHost({ getContext, fetchImpl = globalThis.fetch, worldInfo
                 ctx.saveSettingsDebounced();
             },
         },
-        dispose() { clearTimeout(timer); cleanup.splice(0).forEach(fn => fn()); listeners.clear(); },
+        dispose() { disposed = true; clearTimeout(timer); cleanup.splice(0).forEach(fn => fn()); listeners.clear(); },
     };
 }
