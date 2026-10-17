@@ -8,7 +8,7 @@ export function mountMemoryVault(host) {
   const {
     normalizeEpisodeChronicle, normalizeChronicleState, assertChronicleSize, holdImportedChronicle, rangeAfterCut,
     buildRange, locateRange, rangesOverlap, completedResponses, normalizeReview, strongHash,
-    evaluateChronicle, chronicleFrontier, rowHiddenFrom, assertReviewRoom, MAX_REVIEWS, validateMerge, planAutoMerge, applyMerge, undoMerge, mergeInputHash, scopeSignature,
+    evaluateChronicle, chronicleFrontier, rowHiddenFrom, assertReviewRoom, MAX_REVIEWS, planAutoScene, validateMerge, planAutoMerge, applyMerge, undoMerge, mergeInputHash, scopeSignature,
     normalizeSettings, MERGE_PROMPT_VERSION,
     RANGE_SUMMARY_MAX, SCENE_PROMPT_VERSION,
   } = chronicleLib;
@@ -1899,6 +1899,7 @@ When current and historical facts differ, current facts take precedence.`;
     refreshSummaryAlertDom();
   }
 
+  function isGeneratingNow() { try { return !!host.isGenerating?.(); } catch { return false; } }
   function installPassiveSummaryObserver() {
     let pendingTimer;
     let disposed = false;
@@ -1925,6 +1926,11 @@ When current and historical facts differ, current facts take precedence.`;
         if (!document.getElementById(ROOT_ID)?.hidden && !state.layer && chronicleRowsReady()) {
           try { await loadChronicleRows(); if (await refreshChronicleValidity() || state.activeTab === "episode") render(); }
           catch (error) { console.warn("[기억 보관함] scene check", error); }
+        }
+        // 자동 구간 기록(기본 꺼짐). 생성이 끝난 뒤 이벤트에서만 돌고, 새로고침·재접속은 재시도 계기가 아니다.
+        if (chronicleOf().settings.autoEnabled && !isGeneratingNow()) {
+          try { await recoverChronicleJobs(); await maybeAutoScene(); }
+          catch (error) { toast(`자동 구간 기록을 멈췄어요: ${error?.message || error}`, true); }
         }
       }
     };
@@ -5526,7 +5532,7 @@ When current and historical facts differ, current facts take precedence.`;
       <div class="mmc-toolbar"><div class="mmc-episode-note"><b>장면 기억 ${legacy.length + frontier.length}개</b><small>${on ? "장소·키워드가 대화에 나올 때 '현재' 사실만 들어가요." : "주입 꺼짐 · 보관만 해요."} 구간 기록은 고른 메시지 범위를 요약 전용 요청으로 정리하고 검토 후 저장해요.</small></div><div class="mmc-actions"><button class="mmc-btn mmc-primary" data-action="chronicle-new">${SVG.spark}<span>구간 기록 만들기</span></button><button class="mmc-btn" data-action="new-episode">${SVG.plus}<span>직접 추가</span></button><button class="mmc-btn" data-action="open-source" data-source="summaries" data-target="anchor">${SVG.summary}<span>요약·장면에서</span></button><button class="mmc-btn" data-action="open-source" data-source="messages" data-target="anchor">${SVG.message}<span>대화에서</span></button></div></div>
       ${chronicleReviewCards()}
       ${nodes.length ? `<section class="mmc-chr-section">
-        <div class="mmc-chr-head"><div><b>구간 연대기</b><small>활성 ${frontier.length}개 · 주입 ${injected}개 · 보관 원본 ${archivedCount}개</small></div>
+        <div class="mmc-chr-head"><div><b>구간 연대기</b><small>활성 ${frontier.length}개 · 주입 ${injected}개 · 보관 원본 ${archivedCount}개</small>${autoSceneLabel(autoSceneStatus()) ? `<small class="mmc-chr-auto" data-chr-auto>${esc(autoSceneLabel(autoSceneStatus()))}</small>` : ""}</div>
           <span class="mmc-chr-view" role="tablist"><button type="button" class="mmc-btn mmc-sm ${listView ? "" : "mmc-primary"}" data-action="chronicle-view" data-view="tree" aria-selected="${!listView}">트리</button><button type="button" class="mmc-btn mmc-sm ${listView ? "mmc-primary" : ""}" data-action="chronicle-view" data-view="list" aria-selected="${listView}">목록</button></span></div>
         <div class="mmc-chr-bar"><small>이어진 구간 두 개 이상을 골라 하나의 장으로 합쳐요. 장끼리도, 장과 장면도 합칠 수 있어요. 합친 뒤에는 장만 주입되고 원본은 보관돼요.</small><span><button class="mmc-btn mmc-sm mmc-primary" data-action="chronicle-merge-selected" ${selected.length >= 2 ? "" : "disabled"}>선택한 구간 합치기${selected.length ? ` (${selected.length})` : ""}</button>${selected.length ? '<button class="mmc-btn mmc-sm" data-action="chronicle-clear-selection">선택 해제</button>' : ""}<button class="mmc-btn mmc-sm" data-action="chronicle-settings">연대기 설정</button></span></div>
         ${listView ? chronicleListMarkup(nodes, evaluation) : `<div class="mmc-chr-tree">${frontier.map((ep) => chronicleNodeMarkup(ep, evaluation)).join("") || '<div class="mmc-empty">활성 구간 기록이 없어요.</div>'}</div>`}
@@ -6030,14 +6036,56 @@ When current and historical facts differ, current facts take precedence.`;
     const data = await freshOwnedData();
     const chronicle = normalizeChronicleState(data.chronicle);
     // 기존 후보를 밀어내지 않는다. 호출 전에 자리를 확인하므로 여기 걸리면 저장을 멈춘다.
-    if (!chronicle.reviews.some((row) => row.id === review.id) && chronicle.reviews.length >= MAX_REVIEWS) throw new Error(`검토 대기 후보가 ${MAX_REVIEWS}개라 새 후보를 저장하지 않았어요. 기존 후보는 그대로예요.`);
+    if (!chronicle.reviews.some((row) => row.id === review.id) && !chronicle.jobs.some((job) => job.id === review.id) && chronicle.reviews.length >= MAX_REVIEWS) throw new Error(`검토 대기 후보가 ${MAX_REVIEWS}개라 새 후보를 저장하지 않았어요. 기존 후보는 그대로예요.`);
     chronicle.reviews = [...chronicle.reviews.filter((row) => row.id !== review.id), review];
+    chronicle.jobs = chronicle.jobs.filter((job) => job.id !== review.id);
     if (settingsPatch) chronicle.settings = { ...chronicle.settings, ...settingsPatch };
     data.chronicle = chronicle;
     await persistData(data, { sync: false, silent: true });
   }
-  async function runChronicleScene() {
-    captureChronicleDraft();
+  // 요청을 보내기 직전에 작업 원장에 남기고, 결과(후보·실패)를 저장할 때 지운다.
+  // 새로고침·종료로 결과를 못 받은 작업은 다음에 '결과 미확정' 실패 후보가 되고 다시 호출하지 않는다.
+  // 요청 실패를 셋으로 나눈다. 보내기 전에 막힌 것(not-sent)만 작업 원장을 지운다.
+  // 채팅이 바뀌어 결과를 저장할 수 없는 경우(elsewhere)는 원장을 그 채팅에 남겨 다음에 '결과 미확정'으로 보인다.
+  // 서버가 실패를 돌려준 것(failed)은 실패 후보, 연결 끊김·시간 초과 등 나머지는 비용이 났을 수 있어 '결과 미확정'.
+  function requestOutcome(message) {
+    if (/호출하지 않았|대체하지 않습니다|생성이 끝난 뒤|아직 진행 중|입력 또는 출력 한도|요청 전|연결을 (선택|확인)|프로필/.test(message)) return "not-sent";
+    if (/채팅(을)? 전환|채팅이 바뀌었|종료되어/.test(message)) return "elsewhere";
+    if (/요약 요청 실패 \(|요약 응답이|요약 요청이 실패/.test(message)) return "failed";
+    return "uncertain";
+  }
+  async function recordChronicleJob(base, auto) {
+    const data = await freshOwnedData();
+    const chronicle = normalizeChronicleState(data.chronicle);
+    chronicle.jobs = [...chronicle.jobs, { id: base.id, startedAt: nowIso(), auto: !!auto, review: base }];
+    data.chronicle = chronicle;
+    await persistData(data, { sync: false, silent: true });
+  }
+  async function clearChronicleJob(id) {
+    const data = await freshOwnedData();
+    const chronicle = normalizeChronicleState(data.chronicle);
+    if (!chronicle.jobs.some((job) => job.id === id)) return;
+    chronicle.jobs = chronicle.jobs.filter((job) => job.id !== id);
+    data.chronicle = chronicle;
+    await persistData(data, { sync: false, silent: true });
+  }
+  async function recoverChronicleJobs() {
+    if (state.chronicleJob || !ownershipAllowsData()) return 0;
+    const pending = chronicleOf().jobs;
+    if (!pending.length) return 0;
+    const data = await freshOwnedData();
+    const chronicle = normalizeChronicleState(data.chronicle);
+    for (const job of chronicle.jobs) {
+      const review = normalizeReview({ ...job.review, status: "failed", reason: "결과 미확정: 요청을 보낸 뒤 새로고침되거나 종료돼 응답을 받지 못했어요. 비용이 생겼을 수 있어요. 자동으로 다시 호출하지 않아요." });
+      if (review && !chronicle.reviews.some((row) => row.id === review.id)) chronicle.reviews.push(review);
+    }
+    chronicle.jobs = [];
+    data.chronicle = chronicle;
+    await persistData(data, { sync: false, silent: true });
+    return pending.length;
+  }
+  async function runChronicleScene({ auto = false } = {}) {
+    if (!auto) captureChronicleDraft();
     const info = chronicleRangeInfo();
     const d = state.chronicleDraft;
     if (!info || !info.lines.length) throw new Error("요약할 대화 줄이 없는 구간이에요.");
@@ -6051,30 +6099,34 @@ When current and historical facts differ, current facts take precedence.`;
     if (!range || range.rangeHash !== shown.rangeHash) { render(); throw new Error("그사이 원문이 바뀌었어요. 구간을 다시 확인해 주세요. 모델을 호출하지 않았어요."); }
     const data = normalizeData(state.currentData);
     const chronicle = chronicleOf(data);
-    if (chronicle.reviews.some((rv) => rv.status === "ready" && rv.range.rangeHash === range.rangeHash)) throw new Error("같은 구간의 후보가 이미 검토 대기 중이에요.");
+    if (chronicle.reviews.some((rv) => rv.kind === "scene" && rv.status === "ready" && rv.range.rangeHash === range.rangeHash)) throw new Error("같은 구간의 후보가 이미 검토 대기 중이에요.");
+    if (chronicle.jobs.length) throw new Error("응답을 기다리는(또는 결과 미확정) 요청이 있어요. 보관함을 다시 열어 정리한 뒤 시도해 주세요.");
     const same = rangeScenes(data).find((ep) => ep.id !== d.regenerateId && ep.chronicle.status === "approved" && ep.chronicle.range?.rangeHash === range.rangeHash);
     if (same) throw new Error(`이 구간은 이미 '${truncate(same.title, 30)}'로 기록돼 있어요. 그 기록의 재생성을 사용해 주세요.`);
     const maxTokens = Math.max(200, Math.min(8192, Number(d.maxTokens) || 1200));
     assertReviewRoom(data, maxTokens);
-    if (!window.confirm(`모델을 1회 호출합니다.\n연결: ${conn.label}${conn.model ? ` · ${conn.model}` : ""}\n구간: ${rangeLabel(info.start, info.end)} (${info.count}개 메시지)\n추정 입력 약 ${info.tokens.toLocaleString()} 토큰 · 출력 최대 ${maxTokens.toLocaleString()} 토큰\n결과는 검토 후에만 저장돼요. 진행할까요?`)) return;
+    if (!auto && !window.confirm(`모델을 1회 호출합니다.\n연결: ${conn.label}${conn.model ? ` · ${conn.model}` : ""}\n구간: ${rangeLabel(info.start, info.end)} (${info.count}개 메시지)\n추정 입력 약 ${info.tokens.toLocaleString()} 토큰 · 출력 최대 ${maxTokens.toLocaleString()} 토큰\n결과는 검토 후에만 저장돼요. 진행할까요?`)) return;
     const job = { id: uid("chrjob"), cancelled: false };
     state.chronicleJob = job;
     const requestedAt = nowIso();
     const generation = { requestId: job.id, connectionId: conn.id, source: conn.source, model: conn.model, promptVersion: SCENE_PROMPT_VERSION, inputHash: strongHash(JSON.stringify(info.messages)), requestedAt };
     const base = { id: uid("chr"), kind: "scene", range, replacesEpisodeId: d.regenerateId || "", contextRefs: info.prior.refs, createdAt: requestedAt };
-    const settingsPatch = { connectionId: conn.id, sceneMaxTokens: maxTokens };
-    setBusy(true, "구간 기록을 요청하는 중… (요청 1회)");
+    const settingsPatch = auto ? null : { connectionId: conn.id, sceneMaxTokens: maxTokens };
+    await recordChronicleJob({ ...base, generation }, auto);
+    setBusy(true, auto ? "자동 구간 기록을 요청하는 중… (요청 1회)" : "구간 기록을 요청하는 중… (요청 1회)");
     let result;
     try {
       result = await api("generate/isolated", { method: "POST", timeoutMs: 180000, body: { connectionId: conn.id, messages: info.messages, parameters: { maxTokens }, guard: { startIndex: range.startIndex, endIndex: range.endIndex, rangeHash: range.rangeHash } } });
     } catch (error) {
-      if (job.cancelled) return;
       const message = String(error?.message || error);
-      const afterDispatch = /요약 (응답|요청)|시간이 초과/.test(message);
-      if (afterDispatch) {
-        await saveChronicleReview(normalizeReview({ ...base, status: "failed", reason: /시간이 초과/.test(message) ? `결과 미확정: ${message}` : message, generation: { ...generation, completedAt: nowIso() } }), settingsPatch);
-        state.chronicleReviewId = base.id; state.layer = "chronicle-review";
+      const outcome = requestOutcome(message);
+      if (outcome === "not-sent") {
+        try { await clearChronicleJob(base.id); } catch (clearError) { console.warn("[기억 보관함] job ledger", clearError); }
+      } else if (outcome !== "elsewhere" && !job.cancelled) {
+        await saveChronicleReview(normalizeReview({ ...base, status: "failed", reason: outcome === "uncertain" ? `결과 미확정: ${message}` : message, generation: { ...generation, completedAt: nowIso() } }), settingsPatch);
+        if (!auto) { state.chronicleReviewId = base.id; state.layer = "chronicle-review"; }
       }
+      if (job.cancelled) return;
       throw error;
     } finally {
       if (state.chronicleJob === job) state.chronicleJob = null;
@@ -6083,7 +6135,7 @@ When current and historical facts differ, current facts take precedence.`;
       state.busyTimer = null;
       render();
     }
-    if (job.cancelled) { toast("취소한 요청의 응답이 도착했지만 저장하지 않았어요."); return; }
+    if (job.cancelled) { await clearChronicleJob(base.id); toast("취소한 요청의 응답이 도착했지만 저장하지 않았어요."); return; }
     // 검토 화면이 지금 원문과 나란히 보이도록 다시 읽는다.
     try { await loadChronicleRows(); } catch (error) { console.warn("[기억 보관함] scene rows", error); }
     const done = { ...generation, connectionId: result.connection?.id || conn.id, source: result.connection?.source || conn.source, model: result.connection?.model || conn.model, completedAt: nowIso(), usage: result.usage || { input: info.tokens, output: 0, measured: false } };
@@ -6095,9 +6147,11 @@ When current and historical facts differ, current facts take precedence.`;
       review = normalizeReview({ ...base, status: "failed", reason: String(error?.message || error), generation: done, rawText: String(result.content || "") });
     }
     await saveChronicleReview(review, settingsPatch);
+    if (auto) return review;
     state.chronicleReviewId = review.id;
     state.layer = "chronicle-review";
     render();
+    return review;
   }
 
   // ── 검토 ──
@@ -6200,13 +6254,13 @@ When current and historical facts differ, current facts take precedence.`;
       facts, characters: val("mmc-chr-people").split(/\n/).map((line) => line.split("|").map((x) => x.trim())).filter((p) => p[0]).map(([name, actions = "", relationChange = "", attitudeChange = ""]) => ({ name, actions, relationChange, attitudeChange })),
     };
   }
-  async function approveChronicleReview(id) {
+  async function approveChronicleReview(id, { draft: given = null, auto = false } = {}) {
     const rv = chronicleReview(id);
     if (!reviewCandidate(rv)) throw new Error("승인할 후보가 없어요.");
     if (rv.status !== "ready") throw new Error("보류되거나 실패한 후보는 승인할 수 없어요. 다시 생성해 주세요.");
-    const draft = captureChronicleCandidate(rv);
-    if (rv.kind === "merge") { await approveMergeReview(rv, draft); return; }
-    const replaceOverlaps = !!document.getElementById("mmc-chr-replace-overlaps")?.checked;
+    const draft = given || captureChronicleCandidate(rv);
+    if (rv.kind === "merge") { await approveMergeReview(rv, draft, { silent: auto }); return; }
+    const replaceOverlaps = !auto && !!document.getElementById("mmc-chr-replace-overlaps")?.checked;
     const rows = await loadChronicleRows();
     const loc = locateRange(rows, rv.range);
     if (loc.status !== "exact" && loc.status !== "moved") {
@@ -6243,8 +6297,8 @@ When current and historical facts differ, current facts take precedence.`;
     const chronicle = normalizeChronicleState(data.chronicle);
     chronicle.reviews = chronicle.reviews.filter((row) => row.id !== rv.id);
     data.chronicle = chronicle;
-    await persistData(data);
-    state.chronicleReviewId = ""; state.layer = null;
+    await persistData(data, { silent: auto });
+    if (!auto) { state.chronicleReviewId = ""; state.layer = null; }
     render();
   }
   async function discardChronicleReview(id) {
@@ -6331,8 +6385,50 @@ When current and historical facts differ, current facts take precedence.`;
     if (state.chatCharacters.length >= 2 && (!safeArray(parsed.knownBy).length || facts.some((f) => !safeArray(f.knownBy).length))) cand.scopeNeedsReview = true;
     return cand;
   }
+  // 결과 미확정(시간 초과·새로고침) 후보는 비용이 났을 수 있으니 같은 노드를 다시 호출하지 않는다.
+  function uncertainReview(rv) { return rv.status === "failed" && String(rv.reason || "").startsWith("결과 미확정"); }
   function pendingMergeIds(chronicle = chronicleOf()) {
-    return new Set(chronicle.reviews.filter((rv) => rv.kind === "merge" && rv.status !== "failed").flatMap((rv) => rv.childRefs.map((ref) => ref.id)));
+    return new Set([...chronicle.reviews.filter((rv) => rv.kind === "merge" && (rv.status !== "failed" || uncertainReview(rv))), ...chronicle.jobs.map((job) => job.review).filter((rv) => rv?.kind === "merge")]
+      .flatMap((rv) => safeArray(rv.childRefs).map((ref) => ref.id)));
+  }
+  // 자동 구간 기록: 켜져 있고 수동 승인 기록이 하나 이상 있을 때, 완료 응답 K개가 쌓이면 다음 구간을 1회 요청한다.
+  function autoSceneStatus(data = state.currentData) {
+    const settings = chronicleOf(data).settings;
+    if (!settings.autoEnabled) return { ok: false, reason: "off" };
+    if (!chronicleRowsReady()) return { ok: false, reason: "rows" };
+    const chronicle = chronicleOf(data);
+    if (chronicle.jobs.length) return { ok: false, reason: "job" };
+    if (chronicle.reviews.some((rv) => rv.kind === "scene" && (rv.status !== "failed" || uncertainReview(rv)))) return { ok: false, reason: "review" };
+    return planAutoScene(episodeList(data), state.chronicleRows, settings);
+  }
+  function autoSceneLabel(plan) {
+    if (plan.ok) return `자동 기록 준비됨 · ${rangeLabel(plan.start, plan.end)}`;
+    return ({ off: "", rows: "", job: "자동 기록 대기 · 응답을 기다리는 요청이 있어요", review: "자동 기록 대기 · 검토 대기(또는 결과 미확정) 구간 후보를 먼저 정리해 주세요",
+      gap: `자동 기록 멈춤 · ${rangeLabel(plan.gapStart ?? 0, plan.gapEnd ?? 0)} 공백을 직접 기록해 주세요`, "not-approved": "자동 기록 멈춤 · 갱신 필요·보류된 기록을 먼저 정리해 주세요",
+      unlocated: "자동 기록 멈춤 · 원문을 찾지 못한 기록이 있어요", waiting: `다음 자동 기록까지 완료 응답 ${Math.max(0, (plan.need || 0) - (plan.have || 0))}개 남음` })[plan.reason] || "";
+  }
+  async function maybeAutoScene() {
+    if (state.busy || state.actionPending || state.chronicleJob || state.layer || !ownershipAllowsData()) return null;
+    await loadChronicleRows();
+    const plan = autoSceneStatus();
+    if (!plan.ok) return null;
+    if (!state.chronicleConnections.length) await loadChronicleConnections();
+    const settings = chronicleOf().settings;
+    const prevDraft = state.chronicleDraft;
+    state.chronicleDraft = { start: plan.start, end: plan.end, connectionId: settings.connectionId, maxTokens: settings.sceneMaxTokens, regenerateId: "" };
+    state.actionPending = true;
+    let review;
+    try { review = await runChronicleScene({ auto: true }); }
+    finally { state.chronicleDraft = prevDraft; state.actionPending = false; }
+    if (!review) return null;
+    const cand = review.status === "ready" ? reviewCandidate(review) : null;
+    // 검토 끄기 + 공개·근거 있는·범위 확인이 필요 없는 후보만 바로 적용한다. 숨김 줄·제한·겹침은 검토로 남긴다.
+    if (cand && !settings.reviewBeforeApply && !cand.scopeNeedsReview && !hiddenParts(cand).length && scopeSignature({ event: { knownBy: cand.event.knownByIds }, facts: cand.facts.map((f) => ({ knownBy: f.knownByIds })) }) === "") {
+      try { await approveChronicleReview(review.id, { draft: draftFromCandidate(cand), auto: true }); toast("자동 구간 기록을 저장했어요."); await maybeAutoMerge(); }
+      catch (error) { toast(`자동 기록 후보를 바로 저장하지 못해 검토로 남겼어요: ${error?.message || error}`, true); }
+    } else toast("자동 구간 기록 후보가 검토를 기다려요.");
+    render();
+    return review;
   }
   // 직접 자식이 지금 모두 유효해야 합본을 (재)생성할 수 있다.
   function regenerateMergeCheck(chapter, list, rows) {
@@ -6362,6 +6458,7 @@ When current and historical facts differ, current facts take precedence.`;
     if (auto && check.restricted) return null;
     const pending = pendingMergeIds(chronicle);
     if (ids.some((id) => pending.has(id))) throw new Error("고른 기록 중 합치기 후보가 이미 검토 대기 중이에요. 그 후보를 먼저 확인해 주세요.");
+    if (chronicle.jobs.length) throw new Error("응답을 기다리는(또는 결과 미확정) 요청이 있어요. 보관함을 다시 열어 정리한 뒤 시도해 주세요.");
     const conn = state.chronicleConnections.find((row) => row.id === chronicle.settings.connectionId && row.supported) || state.chronicleConnections.find((row) => row.supported);
     if (!conn) throw new Error("요약에 쓸 연결을 확인해 주세요.");
     const messages = buildMergePrompt(check.nodes);
@@ -6374,18 +6471,22 @@ When current and historical facts differ, current facts take precedence.`;
     const requestedAt = nowIso();
     const generation = { requestId: job.id, connectionId: conn.id, source: conn.source, model: conn.model, promptVersion: MERGE_PROMPT_VERSION, inputHash: strongHash(JSON.stringify(messages)), requestedAt };
     const base = { id: uid("chr"), kind: "merge", childRefs: check.nodes.map((ep) => ({ id: ep.id, revision: ep.chronicle.revision })), inputHash: check.inputHash, auto, replacesEpisodeId, contextRefs: [], createdAt: requestedAt };
+    await recordChronicleJob({ ...base, generation }, auto);
     setBusy(true, auto ? "자동 합치기 요청 중… (요청 1회)" : "합치기 요청 중… (요청 1회)");
     let result;
     try {
       result = await api("generate/isolated", { method: "POST", timeoutMs: 180000, body: { connectionId: conn.id, messages, parameters: { maxTokens } } });
     } catch (error) {
-      if (job.cancelled) return null;
       const message = String(error?.message || error);
-      if (/요약 (응답|요청)|시간이 초과/.test(message)) {
-        const review = normalizeReview({ ...base, status: "failed", reason: /시간이 초과/.test(message) ? `결과 미확정: ${message}` : message, generation: { ...generation, completedAt: nowIso() } });
+      const outcome = requestOutcome(message);
+      if (outcome === "not-sent") {
+        try { await clearChronicleJob(base.id); } catch (clearError) { console.warn("[기억 보관함] job ledger", clearError); }
+      } else if (outcome !== "elsewhere" && !job.cancelled) {
+        const review = normalizeReview({ ...base, status: "failed", reason: outcome === "uncertain" ? `결과 미확정: ${message}` : message, generation: { ...generation, completedAt: nowIso() } });
         await saveChronicleReview(review);
         if (!auto) { state.chronicleReviewId = review.id; state.layer = "chronicle-review"; }
       }
+      if (job.cancelled) return null;
       throw error;
     } finally {
       if (state.chronicleJob === job) state.chronicleJob = null;
@@ -6394,7 +6495,7 @@ When current and historical facts differ, current facts take precedence.`;
       state.busyTimer = null;
       render();
     }
-    if (job.cancelled) { toast("취소한 요청의 응답이 도착했지만 저장하지 않았어요."); return null; }
+    if (job.cancelled) { await clearChronicleJob(base.id); toast("취소한 요청의 응답이 도착했지만 저장하지 않았어요."); return null; }
     const done = { ...generation, completedAt: nowIso(), usage: result.usage || { input: tokens, output: 0, measured: false } };
     let review;
     try {
@@ -6515,9 +6616,16 @@ When current and historical facts differ, current facts take precedence.`;
   function chronicleSettingsLayer() {
     const s = chronicleOf().settings;
     const hasChapter = episodeList().some((ep) => episodeMode(ep) === "chapter");
+    const hasScene = episodeList().some((ep) => episodeMode(ep) === "range" && ep.chronicle.status === "approved");
     return `<div class="mmc-layer-backdrop" data-action="close-layer"><section class="mmc-layer mmc-settings-layer" data-layer-stop>
-      <header><div><span class="mmc-kicker">SCENE CHRONICLE</span><h3>구간 연대기 설정</h3><small>자동 합치기는 모델을 호출해요. 기본은 꺼져 있고, 수동 합치기를 한 번 승인한 뒤 켤 수 있어요.</small></div><button class="mmc-icon-btn" data-action="close-layer">${SVG.close}</button></header>
+      <header><div><span class="mmc-kicker">SCENE CHRONICLE</span><h3>구간 연대기 설정</h3><small>자동 기능은 모델을 호출해요. 기본은 꺼져 있고, 직접 한 번 승인한 뒤 켤 수 있어요.</small></div><button class="mmc-icon-btn" data-action="close-layer">${SVG.close}</button></header>
       <div class="mmc-layer-body">
+        <b>자동 구간 기록</b>
+        <label class="mmc-chr-keep"><input type="checkbox" id="mmc-chr-set-scene-auto" ${s.autoEnabled ? "checked" : ""} ${hasScene || s.autoEnabled ? "" : "disabled"}><span>완료 응답이 쌓이면 다음 구간 기록을 자동으로 요청${hasScene || s.autoEnabled ? "" : " (구간 기록을 먼저 한 번 직접 승인해 주세요)"}</span></label>
+        <div class="mmc-field-row"><label class="mmc-field"><span>구간 크기 <small>완료 응답 수</small></span><input id="mmc-chr-set-every" type="number" min="2" max="100" value="${s.autoEveryResponses}"></label><label class="mmc-field"><span>최근 남겨 둘 응답 <small>버퍼</small></span><input id="mmc-chr-set-buffer" type="number" min="0" max="20" value="${s.autoBuffer}"></label></div>
+        <label class="mmc-chr-keep"><input type="checkbox" id="mmc-chr-set-scene-review" ${s.reviewBeforeApply ? "checked" : ""}><span>자동 구간 기록도 검토 후 저장 (끄면 공개·근거 있는 후보만 바로 저장, 숨김·제한·겹침은 언제나 검토)</span></label>
+        <small class="mmc-chr-cite">이미 기록된 이어진 구간 바로 다음부터만 만들고, 기록 사이에 공백이 있으면 멈춰요. 응답을 기다리거나 결과 미확정인 요청이 있으면 새로 호출하지 않아요.</small>
+        <b>자동 합치기</b>
         <label class="mmc-chr-keep"><input type="checkbox" id="mmc-chr-set-auto" ${s.autoMergeEnabled ? "checked" : ""} ${hasChapter || s.autoMergeEnabled ? "" : "disabled"}><span>자동 합치기 사용${hasChapter || s.autoMergeEnabled ? "" : " (수동 합치기를 먼저 한 번 승인해 주세요)"}</span></label>
         <div class="mmc-field-row"><label class="mmc-field"><span>개수 기준 <small>활성 구간 수</small></span><input id="mmc-chr-set-count" type="number" min="2" max="50" value="${s.mergeCountThreshold}"></label><label class="mmc-field"><span>토큰 기준 <small>활성 구간 추정 합계</small></span><input id="mmc-chr-set-tokens" type="number" min="200" max="50000" step="100" value="${s.mergeTokenThreshold}"></label></div>
         <div class="mmc-field-row"><label class="mmc-field"><span>조건</span><select id="mmc-chr-set-mode"><option value="or" ${s.mergeTriggerMode === "or" ? "selected" : ""}>둘 중 하나(OR)</option><option value="and" ${s.mergeTriggerMode === "and" ? "selected" : ""}>둘 다(AND)</option></select></label><label class="mmc-field"><span>한 번에 호출 상한</span><input id="mmc-chr-set-cap" type="number" min="1" max="5" value="${s.maxCallsPerRun}"></label></div>
@@ -6532,6 +6640,8 @@ When current and historical facts differ, current facts take precedence.`;
     const data = await freshOwnedData();
     const chronicle = normalizeChronicleState(data.chronicle);
     chronicle.settings = normalizeSettings({ ...chronicle.settings,
+      autoEnabled: !!document.getElementById("mmc-chr-set-scene-auto")?.checked, autoEveryResponses: num("mmc-chr-set-every"), autoBuffer: num("mmc-chr-set-buffer"),
+      reviewBeforeApply: !!document.getElementById("mmc-chr-set-scene-review")?.checked,
       autoMergeEnabled: !!document.getElementById("mmc-chr-set-auto")?.checked, mergeCountThreshold: num("mmc-chr-set-count"), mergeTokenThreshold: num("mmc-chr-set-tokens"),
       mergeTriggerMode: document.getElementById("mmc-chr-set-mode")?.value, maxCallsPerRun: num("mmc-chr-set-cap"), mergeReviewBeforeApply: !!document.getElementById("mmc-chr-set-review")?.checked });
     chronicle.suppressedMerges = [];
@@ -7793,7 +7903,7 @@ When current and historical facts differ, current facts take precedence.`;
       if (onScreen && onScreen !== state.selectedChatId && state.chats.some((chat) => chat.id === onScreen)) state.selectedChatId = onScreen;
       await loadCurrentChat();
       await loadConnections();
-      try { await loadChronicleRows(); await refreshChronicleValidity(); } catch (error) { console.warn("[기억 보관함] scene rows", error); }
+      try { await loadChronicleRows(); await refreshChronicleValidity(); if (await recoverChronicleJobs()) toast("응답을 받지 못한 요청을 '결과 미확정' 후보로 남겼어요. 자동으로 다시 호출하지 않아요.", true); } catch (error) { console.warn("[기억 보관함] scene rows", error); }
       await checkNewSummaries({ refreshChat: false, refreshScenes: true, baselineIfUnknown: true, renderAfter: false });
       try { await refreshStaleRecords(); } catch (error) { console.warn("[기억 보관함] source check failed", error); }
       saveUiState();

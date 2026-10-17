@@ -506,6 +506,10 @@ export function createHost({ getContext, fetchImpl = globalThis.fetch, worldInfo
             return { at: saved.at, messageId: `st-message:${saved.count - 1}` };
         },
         getCurrentChatId: () => chatIdentity(getContext()),
+        isGenerating() {
+            const ctx = getContext();
+            return !!isGenerating() || !!(ctx.streamingProcessor && !ctx.streamingProcessor.isFinished);
+        },
         onChange(callback) { listeners.add(callback); return () => listeners.delete(callback); },
         storage: {
             async get() { return clone(getContext().extensionSettings[SETTINGS_KEY] || {}); },

@@ -940,3 +940,4 @@
 @media(max-width:700px){#mmc-root-v1 .mmc-chr-tr>span[data-label]::before{content:attr(data-label) " · ";color:var(--mv-muted);font-weight:600}
 #mmc-root-v1 .mmc-chr-section .mmc-episode-head>div{flex:1 1 calc(100% - 40px)}
 #mmc-root-v1 .mmc-chr-section .mmc-episode-head .mmc-chips{flex-wrap:wrap}}
+#mmc-root-v1 .mmc-chr-auto{color:var(--mv-accent-ink,var(--mv-accent))!important;font-weight:600}

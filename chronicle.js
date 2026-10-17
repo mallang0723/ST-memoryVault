@@ -219,6 +219,8 @@ export function normalizeChronicleState(raw) {
         chapters: (Array.isArray(r.chapters) ? r.chapters : []).filter(rec).map(c => structuredClone(c)),
         // Input hashes of merges the user just undid: auto-merge must not redo them.
         suppressedMerges: (Array.isArray(r.suppressedMerges) ? r.suppressedMerges : []).map(h => str(h, 40)).filter(Boolean).slice(-50),
+        // Requests sent but not yet answered. Survives a reload so an unknown outcome is shown, never retried.
+        jobs: (Array.isArray(r.jobs) ? r.jobs : []).filter(rec).map(j => ({ id: str(j.id, 80), startedAt: str(j.startedAt, 40), auto: j.auto === true, review: rec(j.review) ? structuredClone(j.review) : null })).filter(j => j.id && j.review),
     };
 }
 
@@ -467,8 +469,34 @@ export function undoMerge(episodes, chapterId, now) {
  */
 export function assertReviewRoom(data, maxTokens) {
     const reviews = Array.isArray(data?.chronicle?.reviews) ? data.chronicle.reviews : [];
-    if (reviews.length >= MAX_REVIEWS) throw new Error(`검토 대기 후보가 ${MAX_REVIEWS}개예요. 승인하거나 버린 뒤 다시 시도해 주세요. 모델을 호출하지 않았어요.`);
+    const jobs = Array.isArray(data?.chronicle?.jobs) ? data.chronicle.jobs : [];
+    if (reviews.length + jobs.length >= MAX_REVIEWS) throw new Error(`검토 대기 후보가 ${MAX_REVIEWS}개예요. 승인하거나 버린 뒤 다시 시도해 주세요. 모델을 호출하지 않았어요.`);
     // Worst case: raw response kept for a failed candidate (~4 chars per token, UTF-8 up to 3 bytes) plus parsed fields.
     const projected = chronicleBytes(data) + Math.min(20000, Number(maxTokens || 0) * 4) * 3 + 16000;
     if (projected > MAX_CHRONICLE_BYTES) throw new Error('새 후보를 저장할 공간이 부족해요(장면 연대기 2 MiB). 대기 후보나 오래된 기록을 정리한 뒤 다시 시도해 주세요. 모델을 호출하지 않았어요.');
+}
+
+// ── Automatic range creation (phase E) ──
+/**
+ * Plans the next automatic range. The checkpoint only advances over a gap-free
+ * run of active records from message 0; a gap stops automation (never skipped).
+ * The range covers K completed assistant responses (swipes are not new turns,
+ * system/empty lines do not count), ends on that assistant line so a following
+ * user line stays with its own turn, and the newest `buffer` responses stay out.
+ */
+export function planAutoScene(episodes, rows, settings, evaluation = evaluateChronicle(episodes, rows)) {
+    if (!settings.autoEnabled) return { ok: false, reason: 'off' };
+    let cursor = 0;
+    for (const node of chronicleFrontier(episodes, rows, evaluation)) {
+        const loc = node.res.loc;
+        if (!loc || !['exact', 'moved', 'merged'].includes(loc.status)) return { ok: false, reason: 'unlocated', id: node.id };
+        if (loc.startIndex > cursor) return { ok: false, reason: 'gap', gapStart: cursor, gapEnd: loc.startIndex - 1 };
+        if (node.res.state !== 'approved') return { ok: false, reason: 'not-approved', id: node.id };
+        cursor = Math.max(cursor, loc.endIndex + 1);
+    }
+    const responses = [];
+    for (let i = cursor; i < rows.length; i++) if (rows[i]?.role === 'assistant' && String(rows[i].content || '').trim()) responses.push(i);
+    const need = settings.autoEveryResponses + settings.autoBuffer;
+    if (responses.length < need) return { ok: false, reason: 'waiting', have: responses.length, need, start: cursor };
+    return { ok: true, start: cursor, end: responses[settings.autoEveryResponses - 1], responses: settings.autoEveryResponses };
 }
