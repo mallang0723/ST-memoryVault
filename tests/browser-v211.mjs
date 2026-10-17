@@ -119,6 +119,7 @@ export async function verifyV211({ page, root, click, importMemory, waitSaved, g
         for (const marker of ['QA_SECRET_PROMISE', 'QA_SECRET_FACT', 'QA_SECRET_THREAD_EDITED', 'QA_SECRET_EMPTY_THREAD']) assert.equal(prompt.includes(marker), allowed, `${mode}/${responder}: ${marker}`);
         assert.ok(!prompt.includes('QA_UNKNOWN_SECRET'));
         assert.ok(!prompt.includes('MEMORY_CABINET_BACKUP'));
+        assert.doesNotMatch(prompt, /§MEMORY_CABINET_[A-Z_]+_V1§/);
         cases.push({ mode, responder, allowed, passed: true });
     }
     await writeFile('test-results/v211-prompts.json', JSON.stringify({ cases, prompts }, null, 2));

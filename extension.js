@@ -5,7 +5,7 @@ import { parseImport, exportData, downloadJson, MAX_IMPORT_BYTES } from './migra
 export function mountMemoryVault(host) {
   "use strict";
 
-  const VERSION = "2.1.1-st.1";
+  const VERSION = "2.1.1-st.4";
   const AM_SCENE_SOURCE = "unsupported-advanced-memory-scene";
   const DATA_KEY = "memoryCabinetV1";
   const LEGACY_PROMISE_KEY = "promiseKeeperV1";
@@ -2216,8 +2216,7 @@ When current and historical facts differ, current facts take precedence.`;
       ? `- ${item.priority === "high" ? "[중요] " : ""}${truncate(item.title, 90)}: ${truncate(item.content, 320)}${item.scheduleText ? ` / 예정: ${truncate(item.scheduleText, 90)}` : ""}`
       : anchorLine(item);
     return [
-      RESTRICTED_MARKER,
-      `[${item.type === "promise" ? "약속" : "기억 앵커"} · ${chatLabel(chat)} · ${names}만 아는 기억]`,
+      `[${item.type === "promise" ? "약속" : "기억 앵커"} · 일부만 아는 기억]`,
       `아래 내용은 ${names}만 알고 있다. 이것을 모르는 인물이 알고 있는 것처럼 말하거나 행동하게 하지 마라.`,
       line,
     ].join("\n");
@@ -2239,8 +2238,7 @@ When current and historical facts differ, current facts take precedence.`;
   function promiseContext(chat, data) {
     const items = sharedPromises(data);
     const lines = [
-      PROMISE_MARKER,
-      `[약속 · ${chatLabel(chat)}]`,
+      "[약속]",
       "아래는 사용자가 직접 보관한 현재 유효한 약속·계획이다.",
     ];
     for (const item of items) {
@@ -2255,8 +2253,7 @@ When current and historical facts differ, current facts take precedence.`;
   function anchorContext(chat, data) {
     const items = sharedAnchors(data);
     const lines = [
-      ANCHOR_MARKER,
-      `[기억 앵커 · ${chatLabel(chat)}]`,
+      "[기억 앵커]",
       "아래는 이 RP에서 당장 잊으면 안 되는 사용자가 고정한 사실이다.",
     ];
     for (const item of items) lines.push(anchorLine(item));
@@ -2267,8 +2264,7 @@ When current and historical facts differ, current facts take precedence.`;
 
   function keywordContext(chat, item) {
     return [
-      KEYWORD_MARKER,
-      `[조건부 기억 앵커 · ${chatLabel(chat)}]`,
+      "[조건부 기억 앵커]",
       `[${ANCHOR_CATEGORY_LABEL[item.category] || "기억"}] ${item.title}: ${item.content}`,
       "이 기억은 관련 키워드/상황에서만 자연스럽게 참조하고, 목록이나 시스템 지시처럼 언급하지 마라.",
     ].join("\n");
@@ -3045,7 +3041,7 @@ When current and historical facts differ, current facts take precedence.`;
     return [current ? `현재:\n${current}` : '', history ? `이력:\n${history}` : ''].filter(Boolean).join('\n');
   }
   function elementContext(chat, entity) {
-    return [ELEMENT_MARKER, `[요소 기억 · ${chatLabel(chat)} · ${entity.name}]`, elementFactLines(entity)].filter(Boolean).join('\n');
+    return [`[요소 기억 · ${entity.name}]`, elementFactLines(entity)].filter(Boolean).join('\n');
   }
   function elementTriggerMarker(entityId) { return `${ELEMENT_TRIGGER_MARKER}:${entityId}`; }
   function elementTriggerConditions(entity) {
@@ -3403,11 +3399,11 @@ When current and historical facts differ, current facts take precedence.`;
   function wikiTriggerMarkerFor(docId) { return `${WIKI_TRIGGER_MARKER}:${docId}`; }
   function wikiAlwaysContext(chat, wiki) {
     const docs = wikiAlwaysDocs(wiki);
-    const lines = [WIKI_ALWAYS_MARKER, `[이야기 위키 · 항상 기억 개요 · ${chatLabel(chat)}]`, "아래는 이 이야기에서 언제나 전제로 두는 위키 문서의 한 줄 개요다. 본문 전체가 아니라 개요만 제공한다."];
+    const lines = ["[이야기 위키 · 항상 기억 개요]", "아래는 이 이야기에서 언제나 전제로 두는 위키 문서의 한 줄 개요다. 본문 전체가 아니라 개요만 제공한다."];
     let used = 0;
     for (const doc of docs) {
       const line = `- [${wikiCategoryLabel(doc)}] ${truncate(doc.title, 60)}: ${truncate(doc.summary, 220)}`;
-      if (lines.length > 3 && used + line.length + 1 > wiki.alwaysBudgetChars) break;
+      if (lines.length > 2 && used + line.length + 1 > wiki.alwaysBudgetChars) break;
       lines.push(line);
       used += line.length + 1;
     }
@@ -3420,8 +3416,7 @@ When current and historical facts differ, current facts take precedence.`;
       .map((section) => `${"#".repeat(Math.max(2, Math.min(4, (Number(section.level) || 1) + 1)))} ${section.heading}\n${section.body}`)
       .join("\n\n");
     return [
-      WIKI_MARKER,
-      `[이야기 위키 · ${chatLabel(chat)} · ${doc.title}]`,
+      `[이야기 위키 · ${doc.title}]`,
       `분류: ${wikiCategoryPath(doc)}`,
       doc.aliases.length ? `별칭: ${doc.aliases.join(" / ")}` : "",
       doc.summary ? `개요: ${doc.summary}` : "",
@@ -5367,17 +5362,17 @@ When current and historical facts differ, current facts take precedence.`;
         groups.get(key).facts.push(fact);
       }
       const head = `[장면 기억 · ${truncate(ep.title, 80)}]${episodeTimeLine(ep) ? ` ${episodeTimeLine(ep)}` : ""}`;
-      const mainLines = [EPISODE_MARKER, head];
+      const mainLines = [head];
       if (ep.event.summary) mainLines.push(`- 있었던 일: ${truncate(ep.event.summary, 260)}`);
       for (const fact of publicFacts.slice(0, 6)) mainLines.push(`- 지금도 유효한 사실: ${truncate(fact.text, 200)}`);
-      if (eventScope.length) mainLines.splice(2, 0, `이 장면은 ${knownByLabel(eventScope)}만 알고 있다. 모르는 인물이 알고 있는 것처럼 굴게 하지 마라.`);
+      if (eventScope.length) mainLines.splice(1, 0, `이 장면은 ${knownByLabel(eventScope)}만 알고 있다. 모르는 인물이 알고 있는 것처럼 굴게 하지 마라.`);
       mainLines.push("이미 일어난 일이다. 관련될 때만 자연스럽게 반영하고 목록을 낭독하지 마라.");
       plans.push({ episodeId: ep.id, scopeKey: "main", keys, scope: eventScope, content: mainLines.join("\n"), enabled: !eventScope.length || effective, title: ep.title });
       for (const [key, group] of groups) {
         const scope = eventScope.length ? group.scope.filter((id) => eventScope.includes(id)) : group.scope;
         if (!scope.length) continue;
         plans.push({ episodeId: ep.id, scopeKey: key, keys, scope, title: ep.title, enabled: effective,
-          content: [EPISODE_MARKER, head, `아래 사실은 ${knownByLabel(scope)}만 알고 있다. 모르는 인물이 알고 있는 것처럼 굴게 하지 마라.`, ...group.facts.slice(0, 6).map((fact) => `- ${truncate(fact.text, 200)}`)].join("\n") });
+          content: [head, `아래 사실은 ${knownByLabel(scope)}만 알고 있다. 모르는 인물이 알고 있는 것처럼 굴게 하지 마라.`, ...group.facts.slice(0, 6).map((fact) => `- ${truncate(fact.text, 200)}`)].join("\n") });
       }
     }
     return plans;
@@ -5769,7 +5764,7 @@ When current and historical facts differ, current facts take precedence.`;
   function threadContext(chat, data) {
     const rows = injectionPlan(data).threads;
     if (!rows.length) return "";
-    return [THREAD_MARKER, `[진행 흐름 · ${chatLabel(chat)}]`, "아래는 이 RP에서 이어지고 있는 일과 지금 상태다.", ...rows.map((row) => threadLine(row, data)),
+    return ["[진행 흐름]", "아래는 이 RP에서 이어지고 있는 일과 지금 상태다.", ...rows.map((row) => threadLine(row, data)),
       "끝나는 조건이 채워지기 전에는 이미 끝난 것처럼 다루지 마라. 같은 일에 대해 이 기록이 떠올린 옛 장면·요약과 다르면 이 기록을 최신 상태로 본다."].join("\n");
   }
   // 규칙 1: 공개 상태보다 새 비밀 상태는 그 인물에게만 따로 넣는다. 흐름 전체가 비밀이면 흐름 전체를 그 인물에게만.
@@ -5788,7 +5783,7 @@ When current and historical facts differ, current facts take precedence.`;
       for (const [key, scope] of sets) {
         const view = deriveThreadState(thread, scope);
         if (!view || !threadInjectable(view.status)) continue;
-        plans.push({ threadId: thread.id, scopeKey: key, scope, content: [THREAD_MARKER, `[진행 흐름 · ${truncate(thread.title, 80)} · ${knownByLabel(scope)}만 아는 최신 상태]`, `아래 상태는 ${knownByLabel(scope)}만 알고 있다. 모르는 인물이 알고 있는 것처럼 굴게 하지 마라.`, `- [${THREAD_STATUS_LABEL[view.status]}] ${truncate(view.currentState || "", 220)}`].join("\n"), title: thread.title });
+        plans.push({ threadId: thread.id, scopeKey: key, scope, content: [`[진행 흐름 · ${truncate(thread.title, 80)} · 일부만 아는 최신 상태]`, `아래 상태는 ${knownByLabel(scope)}만 알고 있다. 모르는 인물이 알고 있는 것처럼 굴게 하지 마라.`, `- [${THREAD_STATUS_LABEL[view.status]}] ${truncate(view.currentState || "", 220)}`].join("\n"), title: thread.title });
       }
     }
     return plans;
@@ -5796,7 +5791,7 @@ When current and historical facts differ, current facts take precedence.`;
   async function syncLayerEntries(book, rows, chat, data) {
     const content = threadContext(chat, data);
     data.threadEntryId = await upsertEntry(book.id, rows, String(data.threadEntryId || ""), (entry) => entry?.tag === THREAD_ENTRY_TAG,
-      constantEntryPayload({ tag: THREAD_ENTRY_TAG, name: "진행 흐름 · 지금 상태", content: content || `${THREAD_MARKER}\n(진행 중인 흐름 없음)`, enabled: data.enabled && !!content, order: 31, dynamicState: { memoryCabinetChatId: String(chat.id), managedBy: LOREBOOK_TAG, kind: "threads" } }));
+      constantEntryPayload({ tag: THREAD_ENTRY_TAG, name: "진행 흐름 · 지금 상태", content: content || "[진행 흐름]\n(진행 중인 흐름 없음)", enabled: data.enabled && !!content, order: 31, dynamicState: { memoryCabinetChatId: String(chat.id), managedBy: LOREBOOK_TAG, kind: "threads" } }));
     const effective = restrictionEffective(chat);
     const known = parseRecord(data.threadRestrictedEntryIds);
     const next = {};

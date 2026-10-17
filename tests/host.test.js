@@ -59,7 +59,11 @@ function fixture(options = {}) {
             return Response.json({ ok: true });
         }
         if (path === '/api/worldinfo/get') return Response.json(disk.get(body.name) || { entries: {} });
-        if (path === '/api/worldinfo/list') return Response.json([...disk].filter(([name]) => name !== 'chat').map(([file_id, data]) => ({ file_id, extensions: data.extensions || {} })));
+        if (path === '/api/worldinfo/list') {
+            const rows = [...disk].filter(([name]) => name !== 'chat').map(([file_id, data]) => ({ file_id, extensions: data.extensions || {} }));
+            faults.afterList?.();
+            return Response.json(rows);
+        }
         if (path === '/api/worldinfo/delete') {
             if (faults.delete) return new Response('failed', { status: 500 });
             disk.delete(body.name); return new Response('OK');
@@ -93,11 +97,30 @@ test('custom chat labels stay intact except for one leading duplicate character 
         ['우리들의 첫날 - Seraphina', '우리들의 첫날 - Seraphina'],
         ['2023-5-12 @21h 32m 29s 224ms', '2023-5-12 @21h 32m 29s 224ms'],
         ['Seraphina - 2023-5-12 @21h 32m 29s 224ms 후일담', '2023-5-12 @21h 32m 29s 224ms 후일담'],
+        ['2026-10-07@09h05m03s007ms', '2026-10-07@09h05m03s007ms'],
+        ['Seraphina - 2026-10-07@09h05m03s007ms 후일담', '2026-10-07@09h05m03s007ms 후일담'],
     ]) {
         const f = fixture({ hashString: async () => '68fd4a' + '0'.repeat(58) });
         f.ctx.characters[0].name = 'Seraphina';
         f.ctx.chatId = chat;
         assert.equal(await seed(f), `기억보관함 - Seraphina - ${label} (68fd4a)`);
+    }
+});
+test('ST 1.19 zero-padded timestamps become dates and st.3 names relocate again', async () => {
+    for (const stamp of ['2026-10-16@21h59m59s123ms', '2026-10-07@09h05m03s007ms']) {
+        const f = fixture({ hashString: async () => '68fd4a' + '0'.repeat(58), worldInfo: { retargetLinks: async () => {} } });
+        f.ctx.characters[0].name = 'Seraphina';
+        f.ctx.chatId = `Seraphina - ${stamp}`;
+        const id = await seed(f);
+        assert.equal(id, `기억보관함 - Seraphina - ${stamp.slice(0, 10)} (68fd4a)`);
+        const old = `기억보관함 - Seraphina - ${stamp} (68fd4a)`;
+        const data = { ...structuredClone(f.disk.get(id)), name: old };
+        f.disk.delete(id); f.disk.set(old, data);
+        await f.host.beginSync(f.id);
+        f.host.endSync();
+        assert.equal(f.disk.has(old), false);
+        assert.deepEqual(f.disk.get(id), { ...data, name: id });
+        assert.equal(f.ctx.chatId, `Seraphina - ${stamp}`);
     }
 });
 test('marker discovery survives display/file renames and ignores unrelated files', async () => {
@@ -213,6 +236,19 @@ test('st.2 long-name relocation is lossless, retryable and never deletes an unve
         f.host.endSync();
         assert.equal([...f.disk.keys()].filter(n => n.startsWith('기억보관함')).length, 1);
     }
+});
+test('relocation rechecks a name claimed after allocation and preserves both books', async () => {
+    const f = fixture({ hashString: async () => 'abcdef' + '0'.repeat(58), worldInfo: { retargetLinks: async () => {} } });
+    const id = await seed(f);
+    const old = 'MemoryVault_12345678901234567890123456789012';
+    const original = structuredClone(f.disk.get(id));
+    f.disk.delete(id); f.disk.set(old, original);
+    const foreign = { entries: { 0: { content: 'foreign data' } } };
+    let lists = 0;
+    f.faults.afterList = () => { if (++lists === 2) f.disk.set(id, structuredClone(foreign)); };
+    await assert.rejects(f.host.beginSync(f.id), /충돌/);
+    assert.deepEqual(f.disk.get(id), foreign);
+    assert.deepEqual(f.disk.get(old), original);
 });
 test('group names use group title and collision suffix grows without overwriting a foreign book', async () => {
     const f = fixture({ hashString: async () => 'abcdef12' + '0'.repeat(56) });

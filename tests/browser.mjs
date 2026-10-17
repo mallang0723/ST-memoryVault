@@ -115,6 +115,8 @@ try {
     assert.ok(!hit.includes('IMAGE_SHOULD_NOT_INJECT'));
     assert.ok(!hit.includes('새벽 강가'));
     assert.ok(!hit.includes('MEMORY_CABINET_BACKUP'));
+    assert.doesNotMatch(hit, /§MEMORY_CABINET_[A-Z_]+_V1§/);
+    assert.ok(!hit.includes(chatName), 'chat filename is not a prompt header');
     check('real native scanner: constant, keyword, AND groups, wiki, excluded docs, canonical language');
 
     await root.locator('.mmc-tab[data-tab="wiki"]').click();

@@ -6,7 +6,7 @@
   "js": "index.js",
   "css": "extension.css",
   "author": "원 게시글 작성자 (원작), mallang0723 (SillyTavern 이식)",
-  "version": "2.1.1-st.3",
+  "version": "2.1.1-st.4",
   "homePage": "https://github.com/mallang0723/ST-memoryVault",
   "minimum_client_version": "1.19.0"
 }

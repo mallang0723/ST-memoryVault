@@ -86,7 +86,7 @@ export function createHost({ getContext, fetchImpl = globalThis.fetch, worldInfo
         return type.includes('json') ? response.json() : null;
     }
 
-    function formatBookName(tail, compact = true) {
+    function formatBookName(tail, compact = true, previous = false) {
         const ctx = getContext();
         const group = (ctx.groups || []).find(g => String(g.id) === String(ctx.groupId));
         const clean = value => String(value || '').normalize('NFC').replace(/[\/\\:*?"<>|\x00-\x1f\x7f]/g, ' ').replace(/\s+/g, ' ').trim().replace(/[. ]+$/, '');
@@ -104,7 +104,8 @@ export function createHost({ getContext, fetchImpl = globalThis.fetch, worldInfo
             const fullWho = clean(ctx.groupId ? group?.name : ctx.characters?.[ctx.characterId]?.name);
             const hasPrefix = fullWho && label.startsWith(`${fullWho} - `);
             if (hasPrefix) label = label.slice(fullWho.length + 3);
-            const date = hasPrefix && label.match(/^(\d{4})-(\d{1,2})-(\d{1,2}) @\d{1,2}h \d{1,2}m \d{1,2}s \d{1,3}ms$/);
+            const date = hasPrefix && (label.match(/^(\d{4})-(\d{1,2})-(\d{1,2}) @\d{1,2}h \d{1,2}m \d{1,2}s \d{1,3}ms$/)
+                || (!previous && label.match(/^(\d{4})-(\d{2})-(\d{2})@\d{2}h\d{2}m\d{2}s\d{3}ms$/)));
             if (date) label = `${date[1]}-${date[2].padStart(2, '0')}-${date[3].padStart(2, '0')}`;
         }
         const chat = truncate(label || '채팅', 100);
@@ -138,7 +139,7 @@ export function createHost({ getContext, fetchImpl = globalThis.fetch, worldInfo
         if (isLegacyName(name)) return true;
         const tail = name.match(/ \(([a-f0-9]{6,64})\)$/)?.[1];
         // Only recognize our exact previous formatter, never a user-renamed book.
-        return !!tail && name === formatBookName(tail, false) && name !== formatBookName(tail);
+        return !!tail && (name === formatBookName(tail, false) || name === formatBookName(tail, true, true)) && name !== formatBookName(tail);
     }
 
     function uniqueRow(rows) {
@@ -179,6 +180,10 @@ export function createHost({ getContext, fetchImpl = globalThis.fetch, worldInfo
             const saved = await post('/api/worldinfo/get', { name: newName });
             if (canonical(saved) !== canonical(moved)) throw new Error('이전 사본이 원본과 다릅니다. 두 책 모두 보존했습니다.');
         } else {
+            if ((await post('/api/worldinfo/list', {})).some(row => row.file_id.toLocaleLowerCase().normalize('NFC') === newName.toLocaleLowerCase().normalize('NFC'))) {
+                throw new Error('로어북 이름 충돌: 기존 책과 원본을 보존했습니다. 다시 동기화해 주세요.');
+            }
+            assertChat(chatId);
             await post('/api/worldinfo/edit', { name: newName, data: moved });
         }
         const saved = await post('/api/worldinfo/get', { name: newName });

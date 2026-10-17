@@ -10,6 +10,41 @@ function core(names, host = {}, setup = '') {
     return new Function('host', source)(host);
 }
 const threadFixture = { id: 't', title: 'thread', currentState: 'SECRET', history: [{ state: 'PUBLIC', at: '2026-01-01' }, { state: 'SECRET', at: '2026-02-01', knownBy: ['a'] }] };
+test('injection bodies omit chat labels and internal markers while preserving meaningful names', () => {
+    const c = core(['state', 'normalizeData', 'promiseContext', 'anchorContext', 'keywordContext', 'restrictedContext', 'elementContext', 'wikiAlwaysContext', 'wikiDocContext', 'threadContext']);
+    c.state.chatCharacters = [{ id: 'a', name: 'Alice' }];
+    const chat = { id: 'c', name: 'Seraphina - 2026-10-07@09h05m03s007ms', metadata: {} };
+    const data = c.normalizeData({ items: [], threads: [{ title: '동행', currentState: '다음 길을 찾는다', history: [{ state: '다음 길을 찾는다', status: 'open' }] }] });
+    const entity = { name: '노란 컵', currentFacts: [{ text: '손잡이가 깨졌다' }], historyFacts: [] };
+    const doc = { title: '도서관', sections: [], aliases: [], summary: '북쪽 건물', category: 'place' };
+    const bodies = [
+        c.promiseContext(chat, data), c.anchorContext(chat, data),
+        c.keywordContext(chat, { category: 'fact', title: '컵', content: '노란색' }),
+        c.restrictedContext(chat, { type: 'promise', title: '비밀', content: '약속', knownBy: ['a'] }),
+        c.elementContext(chat, entity), c.wikiAlwaysContext(chat, { docs: [], alwaysBudgetChars: 1000 }),
+        c.wikiDocContext(chat, doc), c.threadContext(chat, data),
+    ];
+    for (const body of bodies) {
+        assert.doesNotMatch(body, /MEMORY_CABINET_|Seraphina|2026-10-07|09h05m03s007ms/);
+    }
+    assert.match(bodies[3], /Alice만 알고 있다/);
+    assert.match(bodies[4], /노란 컵/);
+    assert.match(bodies[6], /도서관/);
+    assert.match(bodies[7], /다음 길을 찾는다/);
+});
+test('scene and private thread payloads omit internal markers without dropping story time or scopes', () => {
+    const c = core(['state', 'normalizeData', 'episodeEntryPlans', 'restrictedThreadPlans']);
+    c.state.chatCharacters = [{ id: 'a', name: 'Alice' }];
+    const chat = { id: 'c', name: 'FILENAME', metadata: { groupChatMode: 'individual' } };
+    const data = c.normalizeData({
+        episodes: [{ id: 'ep', title: '도서관', keywords: ['도서관'], background: { place: '도서관' }, event: { summary: '만났다' }, facts: [{ text: '쪽지를 건넸다', knownBy: ['a'] }] }],
+        threads: [threadFixture],
+    });
+    const plans = [...c.episodeEntryPlans(chat, data), ...c.restrictedThreadPlans(data)];
+    assert.ok(plans.length >= 3);
+    for (const plan of plans) assert.doesNotMatch(plan.content, /MEMORY_CABINET_|FILENAME/);
+    assert.ok(plans.some(p => /Alice만/.test(p.content)));
+});
 test('editing private history without scope change must not publish its state', async () => {
     const savedDocument = globalThis.document;
     globalThis.document = {
