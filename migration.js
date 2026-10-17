@@ -42,6 +42,10 @@ export function parseImport(text) {
     const episodeValid = row => record(row) && typeof row.title === 'string' && row.title.trim()
         && (row.event === undefined || (record(row.event) && scopeValid(row.event)))
         && (row.facts === undefined || (Array.isArray(row.facts) && row.facts.length <= 16 && row.facts.every(f => record(f) && scopeValid(f))))
+        // Chronicle records are refused (not truncated) when a field exceeds its stored limit.
+        && (row.chronicle === undefined || ((row.title || '').trim().length <= 120
+            && String(row.event?.summary || '').trim().length <= 2000
+            && (row.facts || []).every(f => String(f?.text || '').trim().length <= 300)))
         && (row.chronicle === undefined || (record(row.chronicle) && (row.chronicle.range === undefined
             || (record(row.chronicle.range) && Array.isArray(row.chronicle.range.fingerprints) && row.chronicle.range.fingerprints.length <= 2000
                 && row.chronicle.range.fingerprints.every(fp => typeof fp === 'string')))));

@@ -8,7 +8,7 @@ export function mountMemoryVault(host) {
   const {
     normalizeEpisodeChronicle, normalizeChronicleState, assertChronicleSize, holdImportedChronicle, rangeAfterCut,
     buildRange, locateRange, rangesOverlap, completedResponses, normalizeReview, strongHash,
-    evaluateChronicle, chronicleFrontier, validateMerge, planAutoMerge, applyMerge, undoMerge, mergeInputHash, scopeSignature,
+    evaluateChronicle, chronicleFrontier, rowHiddenFrom, assertReviewRoom, MAX_REVIEWS, validateMerge, planAutoMerge, applyMerge, undoMerge, mergeInputHash, scopeSignature,
     normalizeSettings, MERGE_PROMPT_VERSION,
     RANGE_SUMMARY_MAX, SCENE_PROMPT_VERSION,
   } = chronicleLib;
@@ -5825,7 +5825,7 @@ When current and historical facts differ, current facts take precedence.`;
       const row = rows[i];
       if (!row || !["user", "assistant"].includes(String(row.role || "")) || !String(row.content || "").trim()) continue;
       const speaker = String(row.name || (row.role === "user" ? "User" : "Character")).replace(/\s+/g, " ").trim().slice(0, 80);
-      lines.push({ n: lines.length + 1, index: i, speaker, content: labelCharacterConditions(String(row.content || "").trim()), hidden: messageHiddenFromSomeone(row) });
+      lines.push({ n: lines.length + 1, index: i, speaker, content: labelCharacterConditions(String(row.content || "").trim()), hidden: messageHiddenFromSomeone(row), hiddenFrom: rowHiddenFrom(row) });
     }
     return lines;
   }
@@ -5860,7 +5860,8 @@ When current and historical facts differ, current facts take precedence.`;
     return { text: parts.join("\n"), refs };
   }
   function buildScenePrompt(lines, prior) {
-    const body = lines.map((line) => `[${line.n}] ${line.speaker}: ${line.content}`).join("\n");
+    // 일부 인물에게 숨긴 줄은 그 사실을 함께 알려 아는 인물 판단에 쓰게 한다(서비스가 범위를 다시 강제한다).
+    const body = lines.map((line) => `[${line.n}] ${line.speaker}${line.hiddenFrom?.length ? ` (not seen by ${line.hiddenFrom.map(characterName).join(", ")})` : ""}: ${line.content}`).join("\n");
     const user = `${prior.text ? `EARLIER SCENES (reference only):\n${prior.text}\n\n` : ""}LINES:\n${body}`;
     return [{ role: "system", content: SCENE_SYSTEM_PROMPT }, { role: "user", content: user }];
   }
@@ -5967,6 +5968,7 @@ When current and historical facts differ, current facts take precedence.`;
       try { const value = JSON.parse(fragment); if (isRecord(value)) { parsed = value; break; } } catch {}
     }
     if (!parsed || !String(parsed.title || "").trim() || !String(parsed.summary || parsed.event?.summary || "").trim()) throw new Error("응답에서 장면 기록 JSON을 읽지 못했어요. 구조를 고쳐 사실을 만들지 않도록 다시 읽지 않았어요.");
+    assertCandidateLengths(parsed);
     const toLines = (value) => [...new Set(safeArray(value).map(Number).filter((n) => Number.isInteger(n) && n >= 1 && n <= lines.length).map((n) => lines[n - 1].index + 1))].sort((a, b) => a - b).slice(0, 16);
     // 사용자(플레이어) 화자는 인물 범위 대상이 아니다. 사용자만 아는 내용은 공개로 바꾸지 않고 확인을 받는다.
     const userNames = new Set(lines.filter((line) => state.chronicleRows[line.index]?.role === "user").map((line) => line.speaker.toLocaleLowerCase()));
@@ -5995,11 +5997,40 @@ When current and historical facts differ, current facts take precedence.`;
     // 여러 인물이 있는 채팅에서 모델이 아는 인물을 비워 두면 공개로 저장하지 않고 확인을 받는다.
     if (state.chatCharacters.length >= 2 && (omitted(parsed.knownBy) || facts.some((f) => omitted(f.knownBy)))) cand.scopeNeedsReview = true;
     if (lines.some((line) => line.hidden) || userOnly) cand.scopeNeedsReview = true;
+    applyHiddenScopes(cand, lines);
     return cand;
+  }
+  // 모델 응답은 정규화 전에 길이를 검사한다. 넘으면 자르지 않고 실패 후보(원 응답 보존)로 돌린다.
+  function assertCandidateLengths(parsed) {
+    const summary = String(parsed.summary || parsed.event?.summary || "").trim();
+    const title = String(parsed.title || "").trim();
+    const longFact = safeArray(parsed.facts).find((f) => String(isRecord(f) ? f.text || "" : f || "").trim().length > 300);
+    if (summary.length > RANGE_SUMMARY_MAX) throw new Error(`요약이 ${summary.length.toLocaleString()}자로 한도(${RANGE_SUMMARY_MAX.toLocaleString()}자)를 넘어요. 자르지 않고 원 응답을 보존했어요. 구간을 나누거나 다시 생성해 주세요.`);
+    if (title.length > 120) throw new Error("제목이 120자를 넘어요. 자르지 않고 원 응답을 보존했어요.");
+    if (longFact) throw new Error("사실 한 줄이 300자를 넘어요. 자르지 않고 원 응답을 보존했어요.");
+  }
+  // 인물별 숨김 줄에서 나온 내용은 숨김 대상 인물에게 알려진 것으로 저장하지 않는다.
+  // 모델이 'all'이라고 해도 서비스가 범위를 좁히고, 넓히려면 검토 화면에서 따로 확인해야 한다.
+  function applyHiddenScopes(cand, lines) {
+    const byNumber = new Map(lines.map((line) => [line.index + 1, line]));
+    const union = (list) => [...new Set(list.flatMap((line) => line?.hiddenFrom || []))];
+    const restrict = (part, hiddenFrom) => {
+      part.hiddenFrom = hiddenFrom;
+      if (!hiddenFrom.length) return;
+      const allowed = state.chatCharacters.map((c) => c.id).filter((id) => !hiddenFrom.includes(id));
+      const current = normalizeKnownBy(part.knownByIds).filter((id) => !hiddenFrom.includes(id));
+      part.knownByIds = current.length ? current.filter((id) => allowed.includes(id) || part.scopeUnknown?.includes(id)) : allowed;
+      part.scopeConfirmed = false;
+      cand.scopeNeedsReview = true;
+    };
+    restrict(cand.event, union(lines));
+    for (const fact of cand.facts) restrict(fact, union(fact.lines?.length ? fact.lines.map((n) => byNumber.get(n)) : lines));
   }
   async function saveChronicleReview(review, settingsPatch = null) {
     const data = await freshOwnedData();
     const chronicle = normalizeChronicleState(data.chronicle);
+    // 기존 후보를 밀어내지 않는다. 호출 전에 자리를 확인하므로 여기 걸리면 저장을 멈춘다.
+    if (!chronicle.reviews.some((row) => row.id === review.id) && chronicle.reviews.length >= MAX_REVIEWS) throw new Error(`검토 대기 후보가 ${MAX_REVIEWS}개라 새 후보를 저장하지 않았어요. 기존 후보는 그대로예요.`);
     chronicle.reviews = [...chronicle.reviews.filter((row) => row.id !== review.id), review];
     if (settingsPatch) chronicle.settings = { ...chronicle.settings, ...settingsPatch };
     data.chronicle = chronicle;
@@ -6024,6 +6055,7 @@ When current and historical facts differ, current facts take precedence.`;
     const same = rangeScenes(data).find((ep) => ep.id !== d.regenerateId && ep.chronicle.status === "approved" && ep.chronicle.range?.rangeHash === range.rangeHash);
     if (same) throw new Error(`이 구간은 이미 '${truncate(same.title, 30)}'로 기록돼 있어요. 그 기록의 재생성을 사용해 주세요.`);
     const maxTokens = Math.max(200, Math.min(8192, Number(d.maxTokens) || 1200));
+    assertReviewRoom(data, maxTokens);
     if (!window.confirm(`모델을 1회 호출합니다.\n연결: ${conn.label}${conn.model ? ` · ${conn.model}` : ""}\n구간: ${rangeLabel(info.start, info.end)} (${info.count}개 메시지)\n추정 입력 약 ${info.tokens.toLocaleString()} 토큰 · 출력 최대 ${maxTokens.toLocaleString()} 토큰\n결과는 검토 후에만 저장돼요. 진행할까요?`)) return;
     const job = { id: uid("chrjob"), cancelled: false };
     state.chronicleJob = job;
@@ -6078,7 +6110,9 @@ When current and historical facts differ, current facts take precedence.`;
     if (!cand) return null;
     const lineList = (value) => [...new Set(safeArray(value).map(Number).filter((n) => Number.isInteger(n) && n >= 1 && n <= 1e7))].slice(0, 16);
     const rawFacts = safeArray(raw.facts).filter((f) => isRecord(f) && String(f.text || "").trim());
-    cand.facts.forEach((fact, i) => { fact.lines = lineList(rawFacts[i]?.lines); fact.parts = lineList(rawFacts[i]?.parts).filter((n) => n <= MAX_MERGE_PARTS); });
+    const hiddenList = (value) => normalizeKnownBy(value);
+    cand.facts.forEach((fact, i) => { fact.lines = lineList(rawFacts[i]?.lines); fact.parts = lineList(rawFacts[i]?.parts).filter((n) => n <= MAX_MERGE_PARTS); fact.hiddenFrom = hiddenList(rawFacts[i]?.hiddenFrom); });
+    cand.event.hiddenFrom = hiddenList(parseRecord(raw.event).hiddenFrom);
     cand.lines = lineList(raw.lines);
     return cand;
   }
@@ -6108,7 +6142,7 @@ When current and historical facts differ, current facts take precedence.`;
     const many = state.chatCharacters.length >= 2;
     const cited = (fact) => (merge ? fact.parts.length : fact.lines.length);
     const citeText = (fact) => (merge ? `근거 ${fact.parts.map((n) => `PART ${n}`).join(", ")}` : `근거 ${fact.lines.map((n) => `#${n}`).join(", ")}`);
-    const factRow = (fact, j) => `<div class="mmc-chr-fact" data-chr-fact="${j}"><label class="mmc-chr-keep"><input type="checkbox" id="mmc-chr-fact-keep-${j}" ${cited(fact) ? "checked" : ""}><span>포함</span></label><select id="mmc-chr-fact-status-${j}">${Object.entries(FACT_STATUS_LABEL).map(([id, label]) => `<option value="${id}" ${fact.status === id ? "selected" : ""}>${label}</option>`).join("")}</select><input id="mmc-chr-fact-text-${j}" value="${esc(fact.text)}" maxlength="300"><small class="${cited(fact) ? "" : "mmc-scope-warn"}">${cited(fact) ? citeText(fact) : "근거 없음 · 확인 후 포함하세요"}</small>${many || fact.knownByIds.length ? scopeControl("chrdraft-fact", j, fact.knownByIds, { needsReview: c.scopeNeedsReview }) : ""}</div>`;
+    const factRow = (fact, j) => `<div class="mmc-chr-fact" data-chr-fact="${j}"><label class="mmc-chr-keep"><input type="checkbox" id="mmc-chr-fact-keep-${j}" ${cited(fact) ? "checked" : ""}><span>포함</span></label><select id="mmc-chr-fact-status-${j}">${Object.entries(FACT_STATUS_LABEL).map(([id, label]) => `<option value="${id}" ${fact.status === id ? "selected" : ""}>${label}</option>`).join("")}</select><input id="mmc-chr-fact-text-${j}" value="${esc(fact.text)}" maxlength="300"><small class="${cited(fact) ? "" : "mmc-scope-warn"}">${cited(fact) ? citeText(fact) : "근거 없음 · 확인 후 포함하세요"}</small>${fact.hiddenFrom?.length ? `<small class="mmc-scope-warn">${esc(knownByLabel(fact.hiddenFrom))}에게 숨긴 줄에서 나온 사실이에요. 그 인물은 기본 범위에서 빠져요.</small>` : ""}${many || fact.knownByIds.length ? scopeControl("chrdraft-fact", j, fact.knownByIds, { needsReview: c.scopeNeedsReview }) : ""}</div>`;
     const form = !c ? `<div class="mmc-chr-note is-warn">${esc(rv.reason || "후보를 만들지 못했어요.")}</div>${rv.rawText ? `<details class="mmc-chr-preview" open><summary>모델 응답 원문 (저장되지 않음)</summary><pre>${esc(rv.rawText)}</pre></details>` : ""}`
       : `${rv.status === "held" ? `<div class="mmc-chr-note is-warn">${esc(rv.reason)}</div>` : ""}
         <label class="mmc-field"><span>제목</span><input id="mmc-chr-title" value="${esc(c.title)}" maxlength="120"></label>
@@ -6119,6 +6153,7 @@ When current and historical facts differ, current facts take precedence.`;
         <label class="mmc-field"><span>핵심 행동·대사 <small>한 줄에 하나</small></span><textarea id="mmc-chr-actions" rows="3">${esc(c.event.keyActions.join("\n"))}</textarea></label>
         ${many || c.event.knownByIds.length ? `<div class="mmc-field"><span>이 장면을 아는 인물 <small>비우면 모두</small></span>${scopeControl("chrdraft-event", 0, c.event.knownByIds, { needsReview: c.scopeNeedsReview })}</div>` : ""}
         ${c.scopeNeedsReview ? `<label class="mmc-chr-keep"><input type="checkbox" id="mmc-chr-public-ok"><span>아는 인물을 고르지 않은 부분은 모두가 아는 것으로 저장</span></label>` : ""}
+        ${hiddenParts(c).length ? `<div class="mmc-chr-note is-warn">이 구간에는 ${esc(knownByLabel([...new Set(hiddenParts(c).flatMap((part) => part.hiddenFrom))]))}에게 숨긴 줄이 있어요. 그 인물은 기본 범위에서 뺐어요.</div><label class="mmc-chr-keep is-warn"><input type="checkbox" id="mmc-chr-widen-ok"><span>숨김 대상 인물도 알게 되는 범위(모두 공개 포함)로 저장하는 것을 확인했어요</span></label>` : ""}
         <div class="mmc-field"><span>사실 <small>근거 줄이 없는 사실은 기본으로 빠져요</small></span>${c.facts.map(factRow).join("") || '<small>사실 후보 없음</small>'}</div>
         <label class="mmc-field"><span>인물 변화 <small>한 줄에 '이름 | 행동 | 관계 변화 | 감정·태도 변화'</small></span><textarea id="mmc-chr-people" rows="3">${esc(c.characters.map((p) => [p.name, p.actions, p.relationChange, p.attitudeChange].join(" | ")).join("\n"))}</textarea></label>
         ${overlaps.length ? `<label class="mmc-chr-keep is-warn"><input type="checkbox" id="mmc-chr-replace-overlaps"><span>겹치는 기록 ${overlaps.length}개(${esc(overlaps.map((ep) => truncate(ep.title, 18)).join(", "))})를 지난 판으로 돌리고 이 기록으로 교체</span></label>` : ""}
@@ -6149,6 +6184,11 @@ When current and historical facts differ, current facts take precedence.`;
     const facts = c.facts.map((fact, j) => ({ fact, j })).filter(({ j }) => document.getElementById(`mmc-chr-fact-keep-${j}`)?.checked && val(`mmc-chr-fact-text-${j}`))
       .map(({ fact, j }) => ({ id: fact.id, text: val(`mmc-chr-fact-text-${j}`), status: val(`mmc-chr-fact-status-${j}`) || "current", knownBy: hasScope("chrdraft-fact", j) ? scopeIds("chrdraft-fact", j) : fact.knownByIds, lines: fact.lines }));
     const eventKnown = hasScope("chrdraft-event", 0) ? scopeIds("chrdraft-event", 0) : c.event.knownByIds;
+    // 숨김 줄에서 나온 부분을 숨김 대상에게(또는 모두에게) 넓히려면 따로 확인해야 한다.
+    const keptFacts = c.facts.map((fact, j) => ({ fact, j })).filter(({ j }) => document.getElementById(`mmc-chr-fact-keep-${j}`)?.checked);
+    const widened = [[c.event, eventKnown], ...keptFacts.map(({ fact, j }) => [fact, hasScope("chrdraft-fact", j) ? scopeIds("chrdraft-fact", j) : fact.knownByIds])]
+      .some(([part, ids]) => part.hiddenFrom?.length && (!ids.length || ids.some((id) => part.hiddenFrom.includes(id))));
+    if (widened && !document.getElementById("mmc-chr-widen-ok")?.checked) throw new Error("숨긴 줄에서 나온 내용을 숨김 대상 인물에게도(또는 모두에게) 알리는 범위예요. 범위를 좁히거나 확인란에 체크해 주세요.");
     const unresolved = [eventKnown, ...facts.map((f) => f.knownBy)].flat().filter((id) => !state.chatCharacters.some((row) => row.id === id));
     if (unresolved.length) throw new Error(`이 채팅에서 찾지 못한 인물이 범위에 있어요: ${[...new Set(unresolved)].join(", ")}. 인물을 다시 고르거나 체크를 풀어 주세요.`);
     if (c.scopeNeedsReview && !document.getElementById("mmc-chr-public-ok")?.checked && [eventKnown, ...facts.map((f) => f.knownBy)].some((ids) => !ids.length)) {
@@ -6273,6 +6313,7 @@ When current and historical facts differ, current facts take precedence.`;
       try { const value = JSON.parse(fragment); if (isRecord(value)) { parsed = value; break; } } catch {}
     }
     if (!parsed || !String(parsed.title || "").trim() || !String(parsed.summary || "").trim()) throw new Error("응답에서 합본 JSON을 읽지 못했어요. 다시 호출하지 않았어요.");
+    assertCandidateLengths(parsed);
     const toParts = (value) => [...new Set(safeArray(value).map(Number).filter((n) => Number.isInteger(n) && n >= 1 && n <= partCount))].sort((a, b) => a - b);
     const knownOf = (value) => { const list = safeArray(value).map((v) => String(v || "").trim()).filter(Boolean); return list.some((v) => v.toLocaleLowerCase() === "all") ? [] : list; };
     const facts = safeArray(parsed.facts).filter((f) => isRecord(f) && String(f.text || "").trim()).slice(0, 14);
@@ -6326,6 +6367,7 @@ When current and historical facts differ, current facts take precedence.`;
     const messages = buildMergePrompt(check.nodes);
     const tokens = messages.reduce((sum, m) => sum + estimateTokens(m.content), 0);
     const maxTokens = chronicle.settings.sceneMaxTokens;
+    assertReviewRoom(data, maxTokens);
     if (!auto && !window.confirm(`모델을 1회 호출해 ${check.nodes.length}개 기록을 하나로 합칩니다.\n연결: ${conn.label}${conn.model ? ` · ${conn.model}` : ""}\n추정 입력 약 ${tokens.toLocaleString()} 토큰 · 출력 최대 ${maxTokens.toLocaleString()} 토큰\n승인 전에는 원본이 그대로 주입돼요. 진행할까요?`)) return null;
     const job = { id: uid("chrjob"), cancelled: false };
     state.chronicleJob = job;
@@ -6368,6 +6410,7 @@ When current and historical facts differ, current facts take precedence.`;
     if (!auto) { state.chronicleReviewId = review.id; state.layer = "chronicle-review"; render(); }
     return review;
   }
+  function hiddenParts(c) { return [c.event, ...c.facts].filter((part) => part?.hiddenFrom?.length); }
   function draftFromCandidate(c) {
     return { title: c.title, keywords: c.keywords, background: c.background,
       event: { summary: c.event.summary, participants: c.event.participants, keyActions: c.event.keyActions, knownBy: c.event.knownByIds },

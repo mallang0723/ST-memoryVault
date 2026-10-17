@@ -19,14 +19,26 @@ export function strongHash(value) {
 }
 
 /** Message row as exposed by host `chats/:id/messages`. */
+function hiddenIds(value) {
+    return [...new Set((Array.isArray(value) ? value : []).map(v => String(v ?? '').trim()).filter(Boolean))].sort();
+}
+/** Per-character AI-hidden IDs of a host message row (empty when the line is visible to all). */
+export function rowHiddenFrom(row) { return hiddenIds(row?.extra?.hiddenFromAICharacterIds); }
 export function messageFingerprint(row) {
-    return strongHash([String(row?.role || ''), Number(row?.activeSwipeIndex) || 0, String(row?.createdAt || ''), String(row?.name || ''), String(row?.content || '')].join('␟'));
+    const parts = [String(row?.role || ''), Number(row?.activeSwipeIndex) || 0, String(row?.createdAt || ''), String(row?.name || ''), String(row?.content || '')];
+    // A change of who may see the line is a source change. Visible lines keep their old fingerprint.
+    const hidden = rowHiddenFrom(row);
+    if (hidden.length) parts.push(`hidden:${hidden.join(',')}`);
+    return strongHash(parts.join('␟'));
 }
 export function stMessageRow(message, index) {
+    const hidden = hiddenIds(message?.extra?.hiddenFromAICharacterIds);
     return {
         id: `st-message:${index}`, role: message?.is_system ? 'system' : message?.is_user ? 'user' : 'assistant',
         content: String(message?.mes || ''), createdAt: String(message?.send_date || ''), name: message?.name,
         activeSwipeIndex: Number(message?.swipe_id) || 0,
+        // Per-character visibility must survive the host boundary; summaries depend on it.
+        ...(hidden.length ? { extra: { hiddenFromAICharacterIds: hidden } } : {}),
     };
 }
 export function rangeHashOf(fingerprints) { return strongHash(fingerprints.join('|')); }
@@ -201,7 +213,8 @@ export function normalizeChronicleState(raw) {
     const r = rec(raw) ? raw : {};
     return {
         schemaVersion: SCHEMA_VERSION, settings: normalizeSettings(r.settings),
-        reviews: (Array.isArray(r.reviews) ? r.reviews : []).map(normalizeReview).filter(Boolean).slice(-MAX_REVIEWS),
+        // Never evict paid candidates here; the count limit is enforced before a model call.
+        reviews: (Array.isArray(r.reviews) ? r.reviews : []).map(normalizeReview).filter(Boolean),
         // Reserved and kept verbatim. Merged chapters live in episodes[] (chronicle.mode 'chapter').
         chapters: (Array.isArray(r.chapters) ? r.chapters : []).filter(rec).map(c => structuredClone(c)),
         // Input hashes of merges the user just undid: auto-merge must not redo them.
@@ -446,4 +459,16 @@ export function undoMerge(episodes, chapterId, now) {
         }
     }
     return chain.map(n => n.id);
+}
+
+/**
+ * Before a paid call: refuse when the pending-candidate list is full or the
+ * stored chronicle would exceed the size limit with one more worst-case candidate.
+ */
+export function assertReviewRoom(data, maxTokens) {
+    const reviews = Array.isArray(data?.chronicle?.reviews) ? data.chronicle.reviews : [];
+    if (reviews.length >= MAX_REVIEWS) throw new Error(`검토 대기 후보가 ${MAX_REVIEWS}개예요. 승인하거나 버린 뒤 다시 시도해 주세요. 모델을 호출하지 않았어요.`);
+    // Worst case: raw response kept for a failed candidate (~4 chars per token, UTF-8 up to 3 bytes) plus parsed fields.
+    const projected = chronicleBytes(data) + Math.min(20000, Number(maxTokens || 0) * 4) * 3 + 16000;
+    if (projected > MAX_CHRONICLE_BYTES) throw new Error('새 후보를 저장할 공간이 부족해요(장면 연대기 2 MiB). 대기 후보나 오래된 기록을 정리한 뒤 다시 시도해 주세요. 모델을 호출하지 않았어요.');
 }
