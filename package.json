@@ -10,6 +10,7 @@
     "test:isolated": "node tests/isolated-browser.mjs",
     "test:chronicle": "node tests/chronicle-browser.mjs",
     "test:merge": "node tests/chronicle-merge-browser.mjs",
+    "test:verify": "node tests/chronicle-verify-browser.mjs",
     "package": "python3 scripts/package.py"
   },
   "devDependencies": { "playwright": "1.58.2" },
