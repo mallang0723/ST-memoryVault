@@ -49,7 +49,7 @@ await page.route('**/*', route => {
 const root = page.locator('#mmc-root-v1');
 const act = (action, extra = '') => root.locator(`[data-action="${action}"]${extra}`).filter({ visible: true }).first();
 const data = () => page.evaluate(() => structuredClone(SillyTavern.getContext().chatMetadata.memoryCabinetV1));
-const idle = async () => { await page.waitForFunction(() => !document.querySelector('#mmc-root-v1 .mmc-busy'), null, { timeout: 60000 }); await page.waitForTimeout(400); };
+const idle = async () => { await page.waitForFunction(() => !document.querySelector('#mmc-root-v1 .mmc-busy') && !document.getElementById('mmc-root-v1')?.hasAttribute('aria-busy'), null, { timeout: 60000 }); await page.waitForTimeout(300); };
 const shot = async name => { await page.waitForTimeout(450); await page.screenshot({ path: `${shots}/${name}.png` }); };
 const check = message => console.log(`PASS ${message}`);
 const card = id => root.locator(`[data-episode-id="${id}"]`).first();
@@ -87,6 +87,7 @@ async function merge(reply, screenshot = '') {
     await idle();
 }
 const stateOf = id => root.locator(`[data-episode-id="${id}"] [data-chr-state]`).first().getAttribute('data-chr-state');
+const waitStates = (ids, want) => page.waitForFunction(([ids, want]) => ids.every(id => document.querySelector(`#mmc-root-v1 [data-episode-id="${id}"] [data-chr-state]`)?.getAttribute('data-chr-state') === want), [ids, want], { timeout: 30000 });
 async function expand(id) {
     const btn = root.locator(`[data-action="chronicle-toggle-node"][data-id="${id}"]`).first();
     if ((await btn.getAttribute('aria-expanded')) !== 'true') { await btn.click(); await idle(); }
@@ -194,7 +195,7 @@ try {
     await act('chronicle-approve').click();
     await page.waitForFunction(id => SillyTavern.getContext().chatMetadata.memoryCabinetV1.episodes.find(e => e.id === id)?.chronicle.revision === 2, E);
     await idle();
-    assert.equal(await stateOf(E), 'approved');
+    await waitStates([E], 'approved');
     assert.ok((await scan('journey')).includes('ECHO-FACT'));
     check('merged chapters regenerate from their current children bottom-up and become active again');
 
@@ -203,7 +204,7 @@ try {
     await root.locator(`[data-episode-id="${C}"] [data-action="chronicle-undo-merge"]`).first().click();
     await page.waitForFunction(([c, e]) => { const eps = SillyTavern.getContext().chatMetadata.memoryCabinetV1.episodes; return eps.find(x => x.id === c).chronicle.status === 'undone' && eps.find(x => x.id === e).chronicle.status === 'undone'; }, [C, E]);
     await idle();
-    for (const id of [A, B, D]) assert.equal(await stateOf(id), 'approved');
+    await waitStates([A, B, D], 'approved');
     hit = await scan('lantern raft river road harbor journey');
     assert.ok(hit.includes('ALPHA-FACT') && hit.includes('BRAVO-FACT') && hit.includes('DELTA-FACT'));
     assert.ok(!hit.includes('CHARLIE-FACT') && !hit.includes('ECHO-FACT'));
@@ -224,7 +225,7 @@ try {
     await act('chronicle-save-settings').click();
     await page.waitForFunction(() => (SillyTavern.getContext().chatMetadata.memoryCabinetV1.chronicle.reviews || []).some(r => r.kind === 'merge' && r.auto));
     await idle();
-    for (const id of [A, B, D]) assert.equal(await stateOf(id), 'approved', 'review ON keeps originals active');
+    await waitStates([A, B, D], 'approved');
     check('auto-merge (count 3, review ON) produced one pending candidate and changed nothing else');
 
     // Mobile.

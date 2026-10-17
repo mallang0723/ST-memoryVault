@@ -8635,6 +8635,8 @@ When current and historical facts differ, current facts take precedence.`;
     }
     if (state.busy || state.syncing || state.actionPending) return;
     state.actionPending = true;
+    // 작업 중 표시: 연타 방지와 접근성 보조(진행 중 작업이 끝나기 전 클릭은 무시된다).
+    document.getElementById(ROOT_ID)?.setAttribute("aria-busy", "true");
     try {
       if (action === "export-memory") { downloadJson(exportData(state.currentData), "memory-vault.json"); return; }
       if (action === "import-memory") { chooseMemoryImport(); return; }
@@ -9022,7 +9024,7 @@ When current and historical facts differ, current facts take precedence.`;
       if (state.busyTimer) clearInterval(state.busyTimer);
       state.busyTimer = null;
       render();
-    } finally { state.actionPending = false; }
+    } finally { state.actionPending = false; document.getElementById(ROOT_ID)?.removeAttribute("aria-busy"); }
   }
 
   async function handleChange(event) {

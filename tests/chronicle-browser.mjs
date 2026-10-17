@@ -48,7 +48,7 @@ await page.route('**/*', route => {
 const root = page.locator('#mmc-root-v1');
 const act = (action, extra = '') => root.locator(`[data-action="${action}"]${extra}`).filter({ visible: true }).first();
 const data = () => page.evaluate(() => structuredClone(SillyTavern.getContext().chatMetadata.memoryCabinetV1));
-const idle = async () => { await page.waitForFunction(() => !document.querySelector('#mmc-root-v1 .mmc-busy'), null, { timeout: 60000 }); await page.waitForTimeout(400); };
+const idle = async () => { await page.waitForFunction(() => !document.querySelector('#mmc-root-v1 .mmc-busy') && !document.getElementById('mmc-root-v1')?.hasAttribute('aria-busy'), null, { timeout: 60000 }); await page.waitForTimeout(300); };
 const check = message => console.log(`PASS ${message}`);
 const lines = [
     ['QA User', 'Mina, I found an old brass key under the library desk.'], ['QA Mina', 'Mina takes the brass key and hides it in her coat. "Tell no one."'],
@@ -191,9 +191,10 @@ try {
     await chooseRange(9, 12);
     await act('chronicle-run').click();
     await root.locator('[data-action="chronicle-cancel"]').click();
-    await idle();
+    // The cancelled request is still in flight (the action stays pending); only the overlay closes.
+    await page.waitForFunction(() => !document.querySelector('#mmc-root-v1 .mmc-busy'));
     gate.resolve(); gate = null;
-    await page.waitForTimeout(1500);
+    await idle();
     d = await data();
     assert.equal((d.chronicle.reviews || []).length, 0);
     assert.equal(captures.length, 4);
