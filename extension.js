@@ -1,9 +1,14 @@
 import { parseImport, exportData, downloadJson, MAX_IMPORT_BYTES } from './migration.js';
+import * as chronicleLib from './chronicle.js';
 
 // UI and memory rules migrated from the user-supplied Memory Vault v2.0.0.
 // All engine access is isolated in host.js; no Marinara runtime is required.
 export function mountMemoryVault(host) {
   "use strict";
+  const {
+    normalizeEpisodeChronicle, normalizeChronicleState, assertChronicleSize, holdImportedChronicle, rangeAfterCut,
+    RANGE_SUMMARY_MAX,
+  } = chronicleLib;
 
   const VERSION = "2.1.1-st.4";
   const AM_SCENE_SOURCE = "unsupported-advanced-memory-scene";
@@ -1011,6 +1016,7 @@ When current and historical facts differ, current facts take precedence.`;
     }
     value.pendingReview = null;
     value.lastAutoReviewUndo = null;
+    holdImportedChronicle(value);
     return value;
   }
   function scopeReviewMarkup() {
@@ -1056,6 +1062,7 @@ When current and historical facts differ, current facts take precedence.`;
       lastAutoReviewUndo: normalizeAutoReviewUndo(value.lastAutoReviewUndo),
       ...(Array.isArray(value.episodes) ? { episodes: value.episodes.map(normalizeEpisode).filter(Boolean) } : {}),
       ...(Array.isArray(value.threads) ? { threads: value.threads.map(normalizeThread).filter(Boolean) } : {}),
+      ...(isRecord(value.chronicle) ? { chronicle: normalizeChronicleState(value.chronicle) } : {}),
       lastSyncAt: String(value.lastSyncAt || ""),
       lastSyncError: String(value.lastSyncError || ""),
       legacyImportedAt: String(value.legacyImportedAt || ""),
@@ -1320,6 +1327,7 @@ When current and historical facts differ, current facts take precedence.`;
     // 승인 대기 후보와 자동 적용 되돌리기는 부모의 작업 상태다. 분기로 가져가지 않는다(부모에는 그대로 남는다).
     next.pendingReview = null;
     next.lastAutoReviewUndo = null;
+    if (next.chronicle) next.chronicle.reviews = [];
     const scopeHold = normalizeBranchHold(next.branchHold);
     scopeHold.scopeReviewHold.push(...safeArray(next.scopeReviewHold));
     next.scopeReviewHold = [];
@@ -1974,6 +1982,7 @@ When current and historical facts differ, current facts take precedence.`;
     if (!ownershipAllowsData()) throw new Error("소유권 확인 전에는 기억을 저장하거나 동기화할 수 없습니다.");
     await verifyOwnershipBeforePersist();
     const next = normalizeData(data);
+    assertChronicleSize(next);
     next.ownerChatId = String(state.currentChat.id);
     if (!next.elementMemory.originChatId) next.elementMemory.originChatId = String(state.currentChat.id);
     if (!next.wiki.originChatId) next.wiki.originChatId = String(state.currentChat.id);
@@ -5222,12 +5231,15 @@ When current and historical facts differ, current facts take precedence.`;
     const title = String(raw.title || "").trim().replace(/\s+/g, " ").slice(0, 120);
     if (!title) return null;
     const bg = parseRecord(raw.background); const ev = parseRecord(raw.event);
+    // 구간 기록(range)은 근거 범위를 따로 보관한다. 옛 장면(legacy)은 필드가 없고 그대로 둔다.
+    const chronicle = normalizeEpisodeChronicle(raw.chronicle);
+    const summaryMax = chronicle ? RANGE_SUMMARY_MAX : 800;
     return {
       id: String(raw.id || uid("ep")),
       title,
       keywords: normalizeTextList(raw.keywords, 8, 60),
       background: { date: String(bg.date || "").trim().slice(0, 80), timeOfDay: String(bg.timeOfDay || "").trim().slice(0, 40), place: String(bg.place || "").trim().slice(0, 120) },
-      event: { summary: String(ev.summary || "").trim().slice(0, 800), participants: normalizeTextList(ev.participants, 12, 80), keyActions: normalizeTextList(ev.keyActions, 8, 240), ...(normalizeKnownBy(ev.knownBy).length ? { knownBy: normalizeKnownBy(ev.knownBy) } : {}) },
+      event: { summary: String(ev.summary || "").trim().slice(0, summaryMax), participants: normalizeTextList(ev.participants, 12, 80), keyActions: normalizeTextList(ev.keyActions, 8, 240), ...(normalizeKnownBy(ev.knownBy).length ? { knownBy: normalizeKnownBy(ev.knownBy) } : {}) },
       facts: safeArray(raw.facts).map(normalizeEpisodeFact).filter(Boolean).slice(0, 16),
       characters: safeArray(raw.characters).map(normalizeEpisodeCharacter).filter(Boolean).slice(0, 10),
       sourceIds: normalizeTextList(raw.sourceIds, 24, 160),
@@ -5236,10 +5248,14 @@ When current and historical facts differ, current facts take precedence.`;
       msgIndex: Number(raw.msgIndex) || 0,
       ...(raw.replacedBy ? { replacedBy: String(raw.replacedBy) } : {}),
       ...(raw.sourceCandidateId ? { sourceCandidateId: String(raw.sourceCandidateId) } : {}),
+      ...(chronicle ? { chronicle } : {}),
       createdAt: String(raw.createdAt || nowIso()),
       updatedAt: String(raw.updatedAt || raw.createdAt || nowIso()),
     };
   }
+  function episodeMode(ep) { return ep?.chronicle?.mode === "range" ? "range" : "legacy"; }
+  // 구간 기록은 승인된 판만 주입한다. 원문 변경·가져옴·분기 보류는 주입하지 않는다.
+  function episodeInjectable(ep) { return episodeMode(ep) === "legacy" || ep.chronicle.status === "approved"; }
   function episodeList(data = state.currentData) { return safeArray(parseRecord(data).episodes).map(normalizeEpisode).filter(Boolean); }
   function liveEpisodes(data = state.currentData) { return episodeList(data).filter((ep) => !ep.replacedBy); }
   function episodeInjectionOn(data) { return parseRecord(data).episodeInjection !== false; }
@@ -5348,6 +5364,7 @@ When current and historical facts differ, current facts take precedence.`;
     if (!episodeInjectionOn(data)) return plans;
     const effective = restrictionEffective(chat);
     for (const ep of liveEpisodes(data)) {
+      if (!episodeInjectable(ep)) continue;
       const keys = normalizeTextList([...ep.keywords, ep.background.place], 8, 60).filter((key) => key.length >= 2);
       if (!keys.length) continue;
       const eventScope = normalizeKnownBy(ep.event.knownBy);
@@ -5960,9 +5977,11 @@ When current and historical facts differ, current facts take precedence.`;
   function holdPostBranchLayers(next, hold, cutMs, raw) {
     if (Array.isArray(next.episodes)) {
       const rawEps = new Map(safeArray(raw.episodes).filter(isRecord).map((row) => [String(row.id || ""), row]));
+      const cutIndex = Number(String(hold.cutMessageId || "").match(/^st-message:(\d+)$/)?.[1]);
       next.episodes = next.episodes.filter((ep) => {
         const src = rawEps.get(ep.id) || {};
-        const reason = timeAfter(src.createdAt, cutMs) ? "created" : timeAfter(src.updatedAt, cutMs) ? "updated" : "";
+        const reason = timeAfter(src.createdAt, cutMs) ? "created" : timeAfter(src.updatedAt, cutMs) ? "updated"
+          : episodeMode(ep) === "range" && rangeAfterCut(ep.chronicle, cutIndex) ? "range-after-cut" : "";
         if (!reason) return true;
         hold.episodes.push({ ...ep, holdReason: reason });
         return false;

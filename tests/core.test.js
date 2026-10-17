@@ -1,13 +1,14 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
+import * as chronicleLib from '../chronicle.js';
 
 function core(names, host = {}, setup = '') {
     let source = readFileSync(new URL('../extension.js', import.meta.url), 'utf8');
     source = source.replace(/^import .*;\n/gm, '').replace('export function mountMemoryVault', 'function mountMemoryVault');
     const at = source.lastIndexOf('  if (document.readyState');
     source = source.slice(0, at) + `${setup}; return { ${names.join(',')} };\n}\nreturn mountMemoryVault(host);`;
-    return new Function('host', source)(host);
+    return new Function('host', 'chronicleLib', source)(host, chronicleLib);
 }
 const threadFixture = { id: 't', title: 'thread', currentState: 'SECRET', history: [{ state: 'PUBLIC', at: '2026-01-01' }, { state: 'SECRET', at: '2026-02-01', knownBy: ['a'] }] };
 test('injection bodies omit chat labels and internal markers while preserving meaningful names', () => {

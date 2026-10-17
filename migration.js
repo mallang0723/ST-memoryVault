@@ -41,11 +41,15 @@ export function parseImport(text) {
     const scopeValid = row => row.knownBy === undefined || (Array.isArray(row.knownBy) && row.knownBy.every(id => typeof id === 'string' && id.trim()));
     const episodeValid = row => record(row) && typeof row.title === 'string' && row.title.trim()
         && (row.event === undefined || (record(row.event) && scopeValid(row.event)))
-        && (row.facts === undefined || (Array.isArray(row.facts) && row.facts.length <= 16 && row.facts.every(f => record(f) && scopeValid(f))));
+        && (row.facts === undefined || (Array.isArray(row.facts) && row.facts.length <= 16 && row.facts.every(f => record(f) && scopeValid(f))))
+        && (row.chronicle === undefined || (record(row.chronicle) && (row.chronicle.range === undefined
+            || (record(row.chronicle.range) && Array.isArray(row.chronicle.range.fingerprints) && row.chronicle.range.fingerprints.length <= 2000
+                && row.chronicle.range.fingerprints.every(fp => typeof fp === 'string')))));
     const threadValid = row => record(row) && typeof row.title === 'string' && row.title.trim() && scopeValid(row)
         && (row.history === undefined || (Array.isArray(row.history) && row.history.length <= 80 && row.history.every(h => record(h) && scopeValid(h))));
     if (!data.items.every(scopeValid)
         || (data.episodes !== undefined && (!Array.isArray(data.episodes) || data.episodes.length > 400 || !data.episodes.every(episodeValid)))
+        || (data.chronicle != null && (!record(data.chronicle) || (data.chronicle.chapters !== undefined && !Array.isArray(data.chronicle.chapters))))
         || (data.threads !== undefined && (!Array.isArray(data.threads) || data.threads.length > 400 || !data.threads.every(threadValid)))
         || (data.branchHold != null && (!record(data.branchHold) || Object.entries(data.branchHold).some(([key, rows]) => ['items', 'entities', 'facts', 'docs', 'episodes', 'threads', 'threadEntries', 'scopeReviewHold'].includes(key) && (!Array.isArray(rows) || rows.length > 400 || rows.some(r => !record(r))))))) {
         throw new Error('장면·흐름·인물 범위 또는 분기 보류 형식/상한이 올바르지 않습니다.');
