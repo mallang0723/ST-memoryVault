@@ -8,6 +8,7 @@
     "check": "node --check index.js && node --check host.js && node --check isolated-generation.js && node --check chronicle.js && node --check links.js && node --check world-info.js && node --check migration.js && node --check extension.js",
     "test:browser": "node tests/browser.mjs",
     "test:isolated": "node tests/isolated-browser.mjs",
+    "test:chronicle": "node tests/chronicle-browser.mjs",
     "package": "python3 scripts/package.py"
   },
   "devDependencies": { "playwright": "1.58.2" },
