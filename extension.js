@@ -13,7 +13,7 @@ export function mountMemoryVault(host) {
     RANGE_SUMMARY_MAX, SCENE_PROMPT_VERSION,
   } = chronicleLib;
 
-  const VERSION = "2.1.1-st.4";
+  const VERSION = "2.2.0-st.1";
   const AM_SCENE_SOURCE = "unsupported-advanced-memory-scene";
   const DATA_KEY = "memoryCabinetV1";
   const LEGACY_PROMISE_KEY = "promiseKeeperV1";

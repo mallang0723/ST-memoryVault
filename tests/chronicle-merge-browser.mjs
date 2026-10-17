@@ -230,6 +230,20 @@ try {
     await act('chronicle-view', '[data-view="list"]').click(); await idle();
     assert.equal(await root.locator('.mmc-chr-tr:not(.is-head)').count(), 5);
     await shot('list-desktop');
+    // Theme: the chronicle UI follows the vault theme (SillyTavern colours here).
+    await act('settings').click();
+    await root.locator('input[name="mmc-ui-theme"][value="sillytavern"]').check({ force: true });
+    await act('save-settings').click();
+    await idle();
+    if (await root.locator('.mmc-layer').count()) await root.locator('.mmc-layer [data-action="close-layer"]').first().click({ force: true });
+    await root.locator('.mmc-tab[data-tab="episode"]').click(); await idle();
+    await shot('list-theme-sillytavern-desktop');
+    await act('settings').click();
+    await root.locator('input[name="mmc-ui-theme"][value="ribbon"]').check({ force: true });
+    await act('save-settings').click();
+    await idle();
+    if (await root.locator('.mmc-layer').count()) await root.locator('.mmc-layer [data-action="close-layer"]').first().click({ force: true });
+    await root.locator('.mmc-tab[data-tab="episode"]').click(); await idle();
     await act('chronicle-view', '[data-view="tree"]').click(); await idle();
 
     // Auto-merge with review ON: creates a candidate only.
