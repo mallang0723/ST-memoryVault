@@ -535,19 +535,34 @@ export function applyMerge(episodes, parent, childIds, now) {
 
 /**
  * Explicit detach for records whose chapter was moved out of this list on purpose
- * (branch hold). Only parents named in `removedIds` are detached; any other missing
- * parent stays a dangling reference and is held by the graph check.
+ * (branch hold). `heldChapters` are the chapter records actually moved to the hold.
+ * A record is detached only when its parent is one of them, is absent from this list,
+ * and lists the record among its own childRefs. A missing parent id or a backlink the
+ * chapter does not confirm stays a dangling reference and is held by the graph check.
+ * `onlyIds` (optional) narrows the change to those records.
  * Returns the detached record ids.
  */
-export function detachMissingArchiveParents(episodes, removedIds) {
-    const removed = new Set([...(removedIds || [])].map(String));
-    const present = new Set((Array.isArray(episodes) ? episodes : []).filter(rec).map(ep => String(ep.id)));
+export function detachMissingArchiveParents(episodes, heldChapters, onlyIds = null) {
+    const list = Array.isArray(episodes) ? episodes : [];
+    const present = new Set(list.filter(rec).map(ep => String(ep.id)));
+    const chapters = new Map();
+    for (const ch of Array.isArray(heldChapters) ? heldChapters : []) {
+        if (!rec(ch) || !rec(ch.chronicle) || ch.chronicle.mode !== 'chapter') continue;
+        if (['undone', 'deleted'].includes(ch.chronicle.status)) continue;
+        const id = String(ch.id || '');
+        if (!id || present.has(id)) continue;
+        const kids = new Set((Array.isArray(ch.chronicle.childRefs) ? ch.chronicle.childRefs : []).filter(rec).map(ref => String(ref.id)));
+        chapters.set(id, kids);
+    }
+    const only = onlyIds ? new Set([...onlyIds].map(String)) : null;
     const out = [];
-    for (const ep of Array.isArray(episodes) ? episodes : []) {
-        const parentId = rec(ep) && rec(ep.chronicle) ? String(ep.chronicle.archivedBy || '') : '';
-        if (!parentId || present.has(parentId) || !removed.has(parentId)) continue;
+    for (const ep of list) {
+        if (!rec(ep) || !rec(ep.chronicle)) continue;
+        const id = String(ep.id);
+        const parentId = String(ep.chronicle.archivedBy || '');
+        if (!parentId || (only && !only.has(id)) || !chapters.get(parentId)?.has(id)) continue;
         ep.chronicle = { ...ep.chronicle, archivedBy: '', archivedAt: '', detachedFrom: parentId };
-        out.push(String(ep.id));
+        out.push(id);
     }
     return out;
 }

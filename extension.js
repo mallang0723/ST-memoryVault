@@ -14,7 +14,7 @@ export function mountMemoryVault(host) {
     RANGE_SUMMARY_MAX, SCENE_PROMPT_VERSION, MAX_RANGE_MESSAGES,
   } = chronicleLib;
 
-  const VERSION = "2.2.0-st.3";
+  const VERSION = "2.2.0-st.4";
   const AM_SCENE_SOURCE = "unsupported-advanced-memory-scene";
   // 최근 대화에서 가져오기: 처음엔 마지막 120개를 읽고, 더 앞 번호가 필요하면 같은 API의 limit을 늘려 다시 읽는다.
   // 원문 메시지는 최근 SOURCE_MAX_MESSAGES개까지만 불러온다(구간 연대기 범위 상한과 같다).
@@ -7211,7 +7211,7 @@ When current and historical facts differ, current facts take precedence.`;
       });
       // 분기 확인 대기로 옮긴 합본의 하위 기록은 명시적으로 분리한다(그 합본을 되돌리면 다시 묶인다).
       // 이 경로 밖에서 부모가 없는 보관 기록은 손상으로 보고 보류한다.
-      detachMissingArchiveParents(next.episodes, hold.episodes.map((ep) => ep.id));
+      detachMissingArchiveParents(next.episodes, hold.episodes);
     }
     if (Array.isArray(next.threads) && typeof normalizeThread === "function") {
       const rawThreads = new Map(safeArray(raw.threads).filter(isRecord).map((row) => [String(row.id || ""), row]));
@@ -7244,7 +7244,8 @@ When current and historical facts differ, current facts take precedence.`;
       const list = safeArray(data.episodes).map(normalizeEpisode).filter(Boolean);
       if (!list.some((ep) => ep.id === clean.id)) list.push(normalizeEpisode(clean));
       // 아직 대기 중인 합본에 묶여 있던 기록은 분리해 되돌리고, 되돌아온 합본은 분리됐던 하위 기록을 다시 묶는다.
-      detachMissingArchiveParents(list, [clean.chronicle?.archivedBy].filter(Boolean));
+      // 분리 근거는 실제로 대기 중인 합본이 이 기록을 자식으로 나열하는 경우뿐이고, 바꾸는 대상은 되돌린 이 기록 하나다.
+      detachMissingArchiveParents(list, normalizeBranchHold(data.branchHold).episodes, [clean.id]);
       reattachDetachedChildren(list, clean.id, nowIso());
       data.episodes = list.map(normalizeEpisode).filter(Boolean); return true;
     }
@@ -7439,6 +7440,8 @@ When current and historical facts differ, current facts take precedence.`;
       if (!Array.isArray(hold[key])) continue;
       const picked = index === "all" ? hold[key].splice(0) : hold[key].splice(Number(index), 1);
       const back = [];
+      // 대기에서 뺀 합본이 자식으로 나열한, 아직 대기 중인 기록은 그 합본에서 분리해 둔다(나중에 넣어도 끊긴 참조가 되지 않게).
+      if (!keep && key === "episodes") detachMissingArchiveParents(hold.episodes, picked);
       for (const row of picked) {
         if (!keep) { moved += 1; continue; }
         if (restoreHeldRecord(data, key, row)) moved += 1; else { failed += 1; back.push(row); }
