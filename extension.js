@@ -11,11 +11,19 @@ export function mountMemoryVault(host) {
     evaluateChronicle, chronicleFrontier, rowHiddenFrom, assertReviewRoom, MAX_REVIEWS, planAutoScene, planChronicleInjection, validateMerge, planAutoMerge, applyMerge, undoMerge, mergeInputHash, scopeSignature,
     normalizeSettings, MERGE_PROMPT_VERSION, mergeAudience, STRUCTURAL_REASONS, isStandalone, hasDependencies, dependencyClosure,
     detachMissingArchiveParents, reattachDetachedChildren,
-    RANGE_SUMMARY_MAX, SCENE_PROMPT_VERSION,
+    RANGE_SUMMARY_MAX, SCENE_PROMPT_VERSION, MAX_RANGE_MESSAGES,
   } = chronicleLib;
 
-  const VERSION = "2.2.0-st.2";
+  const VERSION = "2.2.0-st.3";
   const AM_SCENE_SOURCE = "unsupported-advanced-memory-scene";
+  // 최근 대화에서 가져오기: 처음엔 마지막 120개를 읽고, 더 앞 번호가 필요하면 같은 API의 limit을 늘려 다시 읽는다.
+  // 원문 메시지는 최근 SOURCE_MAX_MESSAGES개까지만 불러온다(구간 연대기 범위 상한과 같다).
+  const SOURCE_PAGE_MESSAGES = 120;
+  const SOURCE_MAX_MESSAGES = MAX_RANGE_MESSAGES;
+  // 선택한 원문을 담는 한도. 넘으면 보내기 전에 알리고 조용히 자르지 않는다.
+  const SOURCE_LOCAL_CHARS = 16000;
+  const SOURCE_QUOTE_CHARS = 12000;
+  const SOURCE_MODEL_CHARS = 100000;
   const DATA_KEY = "memoryCabinetV1";
   const LEGACY_PROMISE_KEY = "promiseKeeperV1";
     const EXT_STORAGE_KEY = "memoryCabinetUiV1";
@@ -266,6 +274,11 @@ When current and historical facts differ, current facts take precedence.`;
     sourceMode: "messages",
     sourceRows: [],
     sourceSelected: new Set(),
+    sourceRanges: [],
+    sourceWindow: null,
+    sourceRecentN: 20,
+    sourceLastClickId: "",
+    sourceShiftAt: 0,
     sourceTarget: "anchor",
     modelConnectionId: "",
     uiFontSize: "normal",
@@ -7523,16 +7536,41 @@ When current and historical facts differ, current facts take precedence.`;
     </section></div>`;
   }
 
-  function sourceRow(row) {
-    const checked = state.sourceSelected.has(String(row.id));
+  function sourceRow(row, rangeIds = new Set()) {
+    const inRange = state.sourceMode === "messages" && rangeIds.has(String(row.id));
+    const checked = inRange || state.sourceSelected.has(String(row.id));
+    const number = state.sourceMode === "messages" ? messageNumber(row) : null;
     const meta = state.sourceMode === "summaries"
       ? row.sourceKind === AM_SCENE_SOURCE
         ? `고급 메모리 장면${row.timeline ? ` · ${row.timeline}` : ""}${row.startIndex ? ` · #${row.startIndex}–${row.endIndex}` : ""}${sourceRowAudience(row).restricted ? ` · 일부만 앎${sourceRowAudience(row).audienceIds.length ? `: ${knownByLabel(sourceRowAudience(row).audienceIds)}` : ""}` : ""}`
         : `${row.origin === "automated" ? "자동 요약" : row.origin === "manual" ? "수동 요약" : "요약"}${row.messageCount ? ` · ${row.messageCount}개 메시지` : ""}${hasCharacterConditions(row.content) ? " · 인물별 구간 있음" : ""}`
-      : `${roleLabel(row.role)}${row.createdAt ? ` · ${sourceDate(row.createdAt)}` : ""}`;
-    const title = state.sourceMode === "summaries" ? String(row.title || "요약") : truncate(String(row.content || ""), 72);
-    const body = state.sourceMode === "summaries" ? labelCharacterConditions(row.content) : String(row.content || "");
-    return `<label class="mmc-source-row ${checked ? "is-selected" : ""}"><input type="checkbox" data-source-id="${esc(row.id)}" ${checked ? "checked" : ""}><span class="mmc-source-copy"><b>${esc(title)}</b><small>${esc(meta)}</small><p>${esc(truncate(body, 300))}</p></span></label>`;
+      : `${roleLabel(row.role)}${row.createdAt ? ` · ${sourceDate(row.createdAt)}` : ""}${inRange ? " · 범위로 선택됨" : ""}`;
+    // 메시지 모드 제목은 번호와 화자만 둔다. 본문은 바로 아래 미리보기에 있다.
+    const title = state.sourceMode === "summaries" ? String(row.title || "요약") : [number !== null ? `#${number}` : "", String(row.name || "").trim() || roleLabel(row.role)].filter(Boolean).join(" · ");
+    const body = String(state.sourceMode === "summaries" ? labelCharacterConditions(row.content) : row.content || "").trim();
+    // 긴 미리보기는 접어 두고 '더 보기'로 펼친다(모바일).
+    const long = body.length > 160 || body.split("\n").length > 3;
+    const preview = `<p class="mmc-source-preview ${long ? "is-collapsible" : ""}">${esc(truncate(body, 4000))}</p>${long ? `<button type="button" class="mmc-link mmc-source-more" data-action="source-preview-toggle" aria-expanded="false">더 보기</button>` : ""}`;
+    return `<label class="mmc-source-row ${checked ? "is-selected" : ""} ${inRange ? "is-ranged" : ""}"><input type="checkbox" data-source-id="${esc(row.id)}" ${checked ? "checked" : ""} ${inRange ? 'disabled title="범위로 선택됨 · 범위를 지우면 해제돼요"' : ""}><span class="mmc-source-copy"><b>${esc(title)}</b><small>${esc(meta)}</small>${preview}</span></label>`;
+  }
+
+  // 메시지 모드 전용: 최근 N개, 범위 목록, 이전 메시지 불러오기.
+  function sourceMessageTools() {
+    const win = state.sourceWindow || { total: 0, from: 0, limit: 0, complete: true };
+    const ranges = safeArray(state.sourceRanges);
+    const rangeRows = ranges.map((item, i) => {
+      const parsed = parseSourceRange(item?.start, item?.end);
+      const status = sourceRangeStatus(parsed, win);
+      const count = parsed.ok ? sourceRangeIds(state.sourceRows, [parsed]).size : 0;
+      const warn = ["invalid", "outside", "too-old", "partial", "not-loaded"].includes(status.kind);
+      return `<div class="mmc-source-range" data-range-row="${i}"><input type="text" inputmode="numeric" class="mmc-source-range-input" data-source-range="${i}" data-range-part="start" value="${esc(item?.start ?? "")}" placeholder="시작" aria-label="범위 ${i + 1} 시작 번호"><span>-</span><input type="text" inputmode="numeric" class="mmc-source-range-input" data-source-range="${i}" data-range-part="end" value="${esc(item?.end ?? "")}" placeholder="끝" aria-label="범위 ${i + 1} 끝 번호"><small>${parsed.ok ? `${count}개` : ""}</small><button type="button" class="mmc-icon-btn mmc-sm" data-action="source-range-remove" data-range-index="${i}" aria-label="범위 ${i + 1} 지우기">×</button>${warn && status.message ? `<small class="mmc-scope-warn mmc-source-range-warn">${esc(status.message)}</small>` : ""}</div>`;
+    }).join("");
+    const last = win.total - 1;
+    const loaded = win.total ? `#${win.from}–#${last} 불러옴 · 채팅 전체 ${win.total}개` : "불러온 메시지 없음";
+    const more = !win.complete && win.limit < SOURCE_MAX_MESSAGES
+      ? `<button class="mmc-btn mmc-sm" data-action="source-load-older">이전 메시지 더 불러오기</button>`
+      : !win.complete ? `<small>최근 ${SOURCE_MAX_MESSAGES}개까지만 불러와요.</small>` : "";
+    return `<div class="mmc-source-ranges"><div class="mmc-source-ranges-head"><b>범위로 고르기</b><small>메시지 번호(SillyTavern의 #번호)로 고릅니다. 범위와 직접 고른 메시지를 합쳐서 보내요.</small></div>${rangeRows}<div class="mmc-source-ranges-foot"><button class="mmc-btn mmc-sm" data-action="source-range-add">+ 범위 추가</button><small>${esc(loaded)}</small>${more}</div></div>`;
   }
 
   function connectionOptions() {
@@ -7548,17 +7586,24 @@ When current and historical facts differ, current facts take precedence.`;
     const title = isReview ? "새 요약 검토" : state.sourceMode === "summaries" ? "순정 요약에서 가져오기" : "최근 대화에서 가져오기";
     const empty = state.sourceMode === "summaries" ? "이 방에 사용할 수 있는 summaryEntries가 없습니다." : "불러올 최근 메시지가 없습니다.";
     const modelTitle = isReview ? "약속 + 앵커 통합 정리" : "약속 + 앵커 한 번에 분류";
+    const rangeIds = state.sourceMode === "messages" ? sourceRangeIds(state.sourceRows, parsedSourceRanges()) : new Set();
+    const chosen = selectedSourceRows();
+    const selectedCount = chosen.length;
+    const selectedText = sourceToText(chosen);
+    const caps = sourceCapReport(selectedText, { review: isReview });
     const modelHelp = isReview ? "선택한 새 요약과 현재 활성 기록을 함께 비교합니다. 모델은 제안만 하고 자동 적용하지 않습니다." : "선택한 원문은 모델에 한 번만 보내며, 같은 응답에서 약속과 앵커를 함께 분류합니다. 현재 SillyTavern API 연결을 사용합니다.";
     const footer = isReview
-      ? `<button class="mmc-btn" data-action="source-mark-reviewed" ${state.sourceSelected.size ? "" : "disabled"}>검토 완료로 표시</button><div><button class="mmc-btn" data-action="source-local-promise" ${state.sourceSelected.size ? "" : "disabled"}>약속으로 수동 정리</button><button class="mmc-btn" data-action="source-local-anchor" ${state.sourceSelected.size ? "" : "disabled"}>앵커로 수동 정리</button><button class="mmc-btn mmc-model-btn" data-action="source-model-review" ${state.sourceSelected.size && state.modelConnectionId ? "" : "disabled"}>${SVG.spark}<span>모델로 통합 정리</span></button></div>`
-      : `<span></span><div><button class="mmc-btn" data-action="source-local" ${state.sourceSelected.size ? "" : "disabled"}>로컬로 가져오기</button><button class="mmc-btn mmc-model-btn" data-action="source-model" ${state.sourceSelected.size && state.modelConnectionId ? "" : "disabled"}>${SVG.spark}<span>모델로 한 번에 정리</span></button></div>`;
+      ? `<button class="mmc-btn" data-action="source-mark-reviewed" ${selectedCount ? "" : "disabled"}>검토 완료로 표시</button><div><button class="mmc-btn" data-action="source-local-promise" ${selectedCount ? "" : "disabled"}>약속으로 수동 정리</button><button class="mmc-btn" data-action="source-local-anchor" ${selectedCount ? "" : "disabled"}>앵커로 수동 정리</button><button class="mmc-btn mmc-model-btn" data-action="source-model-review" ${selectedCount && state.modelConnectionId && !caps.modelOver ? "" : "disabled"}>${SVG.spark}<span>모델로 통합 정리</span></button></div>`
+      : `<span></span><div><button class="mmc-btn" data-action="source-local" ${selectedCount ? "" : "disabled"}>로컬로 가져오기</button><button class="mmc-btn mmc-model-btn" data-action="source-model" ${selectedCount && state.modelConnectionId && !caps.modelOver ? "" : "disabled"}>${SVG.spark}<span>모델로 한 번에 정리</span></button></div>`;
     return `<div class="mmc-layer-backdrop" data-action="close-layer"><section class="mmc-layer mmc-source-layer" data-layer-stop>
       <header><div><span class="mmc-kicker">${isReview ? "SUMMARY UPDATE" : "SOURCE · READ ONLY"}</span><h3>${title}</h3></div><button class="mmc-icon-btn" data-action="close-layer">${SVG.close}</button></header>
       <div class="mmc-layer-body">
         ${isReview ? '<div class="mmc-candidate-note">새 요약 자체는 수정하지 않습니다. 필요한 기억만 약속/앵커에 반영한 뒤 이 알림을 검토 완료로 표시합니다.</div>' : ""}
         ${state.sourceMode === "messages" && hiddenSkipNote("source") ? `<div class="mmc-candidate-note">${esc(hiddenSkipNote("source"))}</div>` : ""}
-        <div class="mmc-source-toolbar"><button class="mmc-btn" data-action="source-select-all">전체 선택</button><button class="mmc-btn" data-action="source-clear">해제</button><span>${state.sourceSelected.size}개 선택 · 약 ${estimateTokens(sourceToText())} tokens</span></div>
-        <div class="mmc-source-list">${state.sourceRows.length ? state.sourceRows.map(sourceRow).join("") : `<div class="mmc-empty">${empty}</div>`}</div>
+        ${state.sourceMode === "messages" ? sourceMessageTools() : ""}
+        <div class="mmc-source-toolbar"><button class="mmc-btn" data-action="source-select-all">전체 선택</button><button class="mmc-btn" data-action="source-clear">해제</button>${state.sourceMode === "messages" ? `<span class="mmc-source-recent"><input type="number" id="mmc-source-recent-n" min="1" max="${SOURCE_MAX_MESSAGES}" value="${esc(state.sourceRecentN)}" aria-label="최근 몇 개"><button class="mmc-btn" data-action="source-select-recent">최근 N개 선택</button></span>` : ""}<span class="mmc-source-count">${selectedCount}개 선택 · 약 ${estimateTokens(selectedText)} tokens</span></div>
+        ${caps.notes.map((note) => `<div class="mmc-candidate-note ${note.warn ? "mmc-warning-note" : ""}" data-source-cap="${note.kind}">${esc(note.text)}</div>`).join("")}
+        <div class="mmc-source-list">${state.sourceRows.length ? state.sourceRows.map((row) => sourceRow(row, rangeIds)).join("") : `<div class="mmc-empty">${empty}</div>`}</div>
         <section class="mmc-model-strip"><div><b>${modelTitle}</b><small>${modelHelp}</small></div><select id="mmc-source-model">${connectionOptions()}</select></section>
       </div>
       <footer>${footer}</footer>
@@ -7984,6 +8029,7 @@ When current and historical facts differ, current facts take precedence.`;
     state.promisePane = "list";
     state.sourceRows = [];
     state.sourceSelected.clear();
+    resetSourcePaging();
     state.candidates = [];
     state.candidateSelected.clear();
     state.elementCandidates = [];
@@ -8056,7 +8102,186 @@ When current and historical facts differ, current facts take precedence.`;
     }
   }
 
-  function selectedSourceRows() { return state.sourceRows.filter((row) => state.sourceSelected.has(String(row.id))); }
+  // ── 최근 대화에서 가져오기: 메시지 번호·범위·불러오기 ──
+  // 번호는 SillyTavern 채팅의 메시지 번호(#0부터, 화면의 mesid)와 같다. 호스트가 행 ID에 넣어 준다.
+  function messageNumber(row) {
+    const match = String(row?.id || "").match(/^st-message:(\d+)$/);
+    return match ? Number(match[1]) : null;
+  }
+  function parseSourceNumber(value) {
+    const text = String(value ?? "").trim().replace(/^#/, "");
+    if (!text) return null;
+    return /^\d+$/.test(text) ? Number(text) : NaN;
+  }
+  // "시작 - 끝" 한 줄. 한쪽만 적으면 그 메시지 하나, 거꾸로 적으면 바로잡는다. 시작 칸에 "10-40"처럼 적어도 읽는다.
+  function parseSourceRange(startValue, endValue = "") {
+    let startText = String(startValue ?? "").trim();
+    let endText = String(endValue ?? "").trim();
+    const both = !endText && startText.match(/^#?(\d+)\s*[-~–—]\s*#?(\d+)$/);
+    if (both) { startText = both[1]; endText = both[2]; }
+    let start = parseSourceNumber(startText);
+    let end = parseSourceNumber(endText);
+    if (start === null && end === null) return { ok: false, empty: true, error: "" };
+    if (Number.isNaN(start) || Number.isNaN(end)) return { ok: false, empty: false, error: "메시지 번호는 0 이상의 정수로 적어 주세요." };
+    if (start === null) start = end;
+    if (end === null) end = start;
+    if (start > end) [start, end] = [end, start];
+    return { ok: true, empty: false, start, end, error: "" };
+  }
+  // 불러온 창: total = 채팅 전체 메시지 수, from = 불러온 가장 앞 번호, limit = 요청한 개수.
+  function sourceOldestLoadable(win) {
+    return Math.max(0, (Number(win?.total) || 0) - SOURCE_MAX_MESSAGES);
+  }
+  function sourceRangeStatus(range, win) {
+    if (!range?.ok) return { kind: range?.empty ? "empty" : "invalid", message: range?.error || "" };
+    const total = Number(win?.total) || 0;
+    const last = total - 1;
+    if (range.start > last) return { kind: "outside", message: total ? `이 범위는 채팅 기록 밖입니다. 마지막 메시지는 #${last}예요.` : "이 범위는 채팅 기록 밖입니다. 이 채팅에는 메시지가 없어요." };
+    const oldest = sourceOldestLoadable(win);
+    if (range.end < oldest) return { kind: "too-old", message: `최근 ${SOURCE_MAX_MESSAGES}개 메시지(#${oldest}부터)만 불러올 수 있어요. 이 범위는 고르지 않았어요.` };
+    const notes = [];
+    if (range.end > last) notes.push(`일부가 채팅 기록 밖입니다. #${last}까지만 골라요.`);
+    if (range.start < oldest) notes.push(`#${oldest}보다 앞은 불러올 수 없어 빼고 골라요(최근 ${SOURCE_MAX_MESSAGES}개까지).`);
+    const from = Number.isInteger(win?.from) ? win.from : total;
+    if (Math.max(range.start, oldest) < from) return { kind: "not-loaded", message: `#${Math.max(range.start, oldest)}부터는 아직 불러오지 않았어요.` };
+    return { kind: notes.length ? "partial" : "ok", message: notes.join(" ") };
+  }
+  // 범위를 덮으려면 limit을 얼마로 늘려야 하는지. 늘릴 필요가 없으면 0.
+  function sourceLimitForRanges(ranges, win) {
+    const total = Number(win?.total) || 0;
+    if (!total || win?.complete) return 0;
+    const oldest = sourceOldestLoadable(win);
+    let need = 0;
+    for (const range of safeArray(ranges)) {
+      if (!range?.ok || range.start > total - 1 || range.end < oldest) continue;
+      need = Math.max(need, total - Math.max(range.start, oldest));
+    }
+    need = Math.min(SOURCE_MAX_MESSAGES, need);
+    return need > (Number(win?.limit) || 0) ? need : 0;
+  }
+  function parsedSourceRanges(list = state.sourceRanges) {
+    return safeArray(list).map((item) => parseSourceRange(item?.start, item?.end));
+  }
+  function sourceRangeIds(rows, ranges) {
+    const ok = safeArray(ranges).filter((range) => range?.ok);
+    const ids = new Set();
+    if (!ok.length) return ids;
+    for (const row of safeArray(rows)) {
+      const n = messageNumber(row);
+      if (n !== null && ok.some((range) => n >= range.start && n <= range.end)) ids.add(String(row.id));
+    }
+    return ids;
+  }
+  function recentSourceIds(rows, count) {
+    const n = Math.max(0, Math.floor(Number(count) || 0));
+    return safeArray(rows)
+      .map((row, i) => ({ row, key: messageNumber(row) ?? -i }))
+      .sort((a, b) => b.key - a.key)
+      .slice(0, n)
+      .map(({ row }) => String(row.id));
+  }
+  // 선택 = 직접 고른 것 ∪ 범위. 요약 모드는 범위를 쓰지 않는다.
+  function effectiveSourceIds() {
+    const ids = new Set(state.sourceSelected);
+    if (state.sourceMode === "messages") for (const id of sourceRangeIds(state.sourceRows, parsedSourceRanges())) ids.add(id);
+    return ids;
+  }
+  // 한도를 넘는 선택은 보내기 전에 알린다. kind: model(모델 입력) / local(로컬 초안) / quote(출처 인용 저장).
+  function sourceCapReport(text, { review = false } = {}) {
+    const chars = String(text || "").length;
+    const notes = [];
+    const modelOver = chars > SOURCE_MODEL_CHARS;
+    const localOver = chars > SOURCE_LOCAL_CHARS;
+    const quoteOver = chars > SOURCE_QUOTE_CHARS;
+    if (modelOver) notes.push({ kind: "model", warn: true, text: `선택한 원문이 ${chars.toLocaleString()}자예요. 모델 입력 한도 ${SOURCE_MODEL_CHARS.toLocaleString()}자를 넘어 모델로 보내지 않아요. 선택을 줄여 주세요.` });
+    if (localOver) notes.push({ kind: "local", warn: true, text: `${review ? "수동 정리" : "로컬로 가져오기"}는 앞 ${SOURCE_LOCAL_CHARS.toLocaleString()}자만 담아요(지금 ${chars.toLocaleString()}자). 누르면 먼저 확인을 받아요.` });
+    if (quoteOver) notes.push({ kind: "quote", warn: false, text: `출처 인용은 앞 ${SOURCE_QUOTE_CHARS.toLocaleString()}자만 저장돼요.` });
+    return { chars, modelOver, localOver, quoteOver, notes };
+  }
+  function assertModelSourceFits(text) {
+    const chars = String(text || "").length;
+    if (chars > SOURCE_MODEL_CHARS) throw new Error(`선택한 원문이 ${chars.toLocaleString()}자로 모델 입력 한도 ${SOURCE_MODEL_CHARS.toLocaleString()}자를 넘어요. 잘라서 보내지 않았어요. 선택을 줄여 주세요. 모델을 호출하지 않았어요.`);
+    return String(text || "");
+  }
+  function resetSourcePaging() {
+    state.sourceRanges = [];
+    state.sourceWindow = null;
+    state.sourceLastClickId = "";
+    state.sourceShiftAt = 0;
+  }
+  // 같은 API(messages?limit=N)로 마지막 N개를 다시 읽는다. N은 SOURCE_MAX_MESSAGES를 넘지 않는다.
+  async function loadSourceMessages(limit) {
+    const want = Math.min(SOURCE_MAX_MESSAGES, Math.max(1, Math.floor(Number(limit) || SOURCE_PAGE_MESSAGES)));
+    const payload = await api(`chats/${encodeURIComponent(state.selectedChatId)}/messages?limit=${want}`);
+    const raw = extractArray(payload, ["messages", "items", "results"]);
+    const numbers = raw.map(messageNumber).filter((n) => n !== null);
+    const total = numbers.length ? Math.max(...numbers) + 1 : raw.length;
+    const from = numbers.length ? Math.min(...numbers) : 0;
+    state.sourceRows = readableMessages(raw, "source").reverse();
+    state.sourceWindow = { limit: want, total, from, complete: from === 0 || raw.length < want };
+    const present = new Set(state.sourceRows.map((row) => String(row.id)));
+    for (const id of [...state.sourceSelected]) if (!present.has(id)) state.sourceSelected.delete(id);
+    return state.sourceWindow;
+  }
+  async function withSourceLoading(text, fn) {
+    setBusy(true, text);
+    try { return await fn(); } finally {
+      state.busy = false;
+      if (state.busyTimer) clearInterval(state.busyTimer);
+      state.busyTimer = null;
+      render();
+    }
+  }
+  async function ensureSourceRangesLoaded() {
+    const need = sourceLimitForRanges(parsedSourceRanges(), state.sourceWindow);
+    if (!need) return false;
+    await withSourceLoading("범위의 이전 메시지를 불러오는 중…", () => loadSourceMessages(need));
+    return true;
+  }
+  async function loadOlderSourceMessages() {
+    const win = state.sourceWindow;
+    if (!win || win.complete || win.limit >= SOURCE_MAX_MESSAGES) return;
+    await withSourceLoading("이전 메시지를 불러오는 중…", () => loadSourceMessages(win.limit + SOURCE_PAGE_MESSAGES));
+  }
+  async function selectRecentSource(count) {
+    const n = Math.max(1, Math.min(SOURCE_MAX_MESSAGES, Math.floor(Number(count) || 0)));
+    state.sourceRecentN = n;
+    // 읽을 수 있는 메시지가 모자라면 상한 안에서 더 불러온다(숨긴 메시지는 세지 않는다).
+    for (let guard = 0; guard < 20; guard += 1) {
+      const win = state.sourceWindow;
+      if (state.sourceRows.length >= n || !win || win.complete || win.limit >= SOURCE_MAX_MESSAGES) break;
+      const next = Math.min(SOURCE_MAX_MESSAGES, win.limit + Math.max(SOURCE_PAGE_MESSAGES, n - state.sourceRows.length));
+      await withSourceLoading("이전 메시지를 불러오는 중…", () => loadSourceMessages(next));
+    }
+    state.sourceSelected = new Set(recentSourceIds(state.sourceRows, n));
+    return state.sourceSelected.size;
+  }
+  function captureSourceFocus() {
+    const el = globalThis.document?.activeElement;
+    if (!el?.closest?.(".mmc-source-layer") || typeof el.value !== "string") return null;
+    const sel = el.dataset?.sourceRange != null ? `[data-source-range="${el.dataset.sourceRange}"][data-range-part="${el.dataset.rangePart}"]` : el.id ? `#${el.id}` : "";
+    return sel ? { sel, value: el.value, start: el.selectionStart, end: el.selectionEnd } : null;
+  }
+  function restoreSourceFocus(saved) {
+    if (!saved) return;
+    const el = document.querySelector(`#${ROOT_ID} ${saved.sel}`);
+    if (!el) return;
+    el.value = saved.value;
+    el.focus();
+    try { el.setSelectionRange(saved.start, saved.end); } catch { /* number 입력은 커서 위치가 없다 */ }
+  }
+  // Shift를 누른 채 고르면 직전에 고른 줄부터 이 줄까지 같은 상태로 바꾼다.
+  function toggleSourceRow(id, checked, shift = false) {
+    const ids = state.sourceRows.map((row) => String(row.id));
+    const last = state.sourceLastClickId;
+    const a = ids.indexOf(last);
+    const b = ids.indexOf(id);
+    const span = shift && a >= 0 && b >= 0 ? ids.slice(Math.min(a, b), Math.max(a, b) + 1) : [id];
+    for (const each of span) { if (checked) state.sourceSelected.add(each); else state.sourceSelected.delete(each); }
+    state.sourceLastClickId = id;
+    return span.length;
+  }
+  function selectedSourceRows() { const ids = effectiveSourceIds(); return state.sourceRows.filter((row) => ids.has(String(row.id))); }
   function sourceToText(rows = selectedSourceRows()) {
     if (state.sourceMode === "summaries") return rows.map(summaryRowText).join("\n\n");
     return rows.map((row) => `${roleLabel(row.role)}: ${row.content || ""}`).join("\n\n");
@@ -8066,6 +8291,7 @@ When current and historical facts differ, current facts take precedence.`;
     state.sourceMode = mode === "summaries" ? "summaries" : "messages";
     state.sourceTarget = target === "promise" ? "promise" : "anchor";
     state.sourceSelected.clear();
+    resetSourcePaging();
     setBusy(true, state.sourceMode === "summaries" ? "요약을 불러오는 중…" : "최근 대화를 불러오는 중…");
     try {
       if (state.sourceMode === "summaries") {
@@ -8081,8 +8307,7 @@ When current and historical facts differ, current facts take precedence.`;
           state.sourceRows = [...state.amSceneRows.slice().reverse().slice(0, 80), ...state.sourceRows];
         }
       } else {
-        const payload = await api(`chats/${encodeURIComponent(state.selectedChatId)}/messages?limit=120`);
-        state.sourceRows = readableMessages(extractArray(payload, ["messages", "items", "results"]), "source").slice(-80).reverse();
+        await loadSourceMessages(SOURCE_PAGE_MESSAGES);
       }
       state.layer = "source";
     } finally {
@@ -8097,8 +8322,10 @@ When current and historical facts differ, current facts take precedence.`;
     const rows = selectedSourceRows();
     if (!rows.length) throw new Error("가져올 원문을 선택해 주세요.");
     const fullText = sourceToText(rows);
-    const text = fullText.slice(0, 16000);
-    const sourceQuote = fullText.slice(0, 12000);
+    // 한도를 넘으면 자르기 전에 묻는다. 취소하면 아무것도 만들지 않는다.
+    if (fullText.length > SOURCE_LOCAL_CHARS && !window.confirm(`선택한 원문이 ${fullText.length.toLocaleString()}자예요. 초안에는 앞 ${SOURCE_LOCAL_CHARS.toLocaleString()}자만 담기고 나머지 ${(fullText.length - SOURCE_LOCAL_CHARS).toLocaleString()}자는 빠져요.\n그래도 가져올까요? 취소하면 선택을 줄일 수 있어요.`)) return false;
+    const text = fullText.slice(0, SOURCE_LOCAL_CHARS);
+    const sourceQuote = fullText.slice(0, SOURCE_QUOTE_CHARS);
     const sourceIds = rows.map((row) => String(row.id || "")).filter(Boolean);
     const target = targetOverride === "promise" || targetOverride === "anchor" ? targetOverride : state.sourceTarget;
     if (target === "anchor") {
@@ -8564,13 +8791,14 @@ When current and historical facts differ, current facts take precedence.`;
 
   async function generateReviewCandidates(rows = selectedSourceRows(), { showLayer = true } = {}) {
     if (!rows.length) throw new Error("정리할 새 요약을 선택해 주세요.");
+    assertModelSourceFits(sourceToText(rows));
     const connectionId = String(document.getElementById("mmc-source-model")?.value || state.modelConnectionId || "");
     if (!connectionId) throw new Error("사용할 모델 연결을 선택해 주세요.");
     state.modelConnectionId = connectionId;
     await saveUiState();
     setBusy(true, "모델이 약속과 기억 앵커를 함께 비교하는 중…");
     try {
-      const sourceText = sourceToText(rows).slice(0, 100000);
+      const sourceText = assertModelSourceFits(sourceToText(rows));
       const snapshot = reviewMemorySnapshot();
       const restrictedContext = reviewContextHasRestricted();
       const payload = await api("generate/raw", {
@@ -8763,13 +8991,14 @@ When current and historical facts differ, current facts take precedence.`;
   async function generateCandidates() {
     const rows = selectedSourceRows();
     if (!rows.length) throw new Error("원문을 선택해 주세요.");
+    assertModelSourceFits(sourceToText(rows));
     const connectionId = String(document.getElementById("mmc-source-model")?.value || state.modelConnectionId || "");
     if (!connectionId) throw new Error("사용할 모델 연결을 선택해 주세요.");
     state.modelConnectionId = connectionId;
     await saveUiState();
     setBusy(true, "모델이 약속과 기억 앵커를 한 번에 분류하는 중…");
     try {
-      const text = sourceToText(rows).slice(0, 100000);
+      const text = assertModelSourceFits(sourceToText(rows));
       const payload = await api("generate/raw", {
         method: "POST",
         timeoutMs: MODEL_TIMEOUT_MS,
@@ -8891,9 +9120,29 @@ When current and historical facts differ, current facts take precedence.`;
   // 저장·적용 계열은 한 번에 하나만 실행한다. 동기화가 느릴 때 연타로 같은 기록이 두 번 생기지 않게 한다.
   const LOCKED_ACTIONS = new Set(["chronicle-run", "chronicle-approve", "chronicle-discard", "chronicle-retry", "chronicle-reconfirm", "chronicle-standalone", "chronicle-merge-selected", "chronicle-undo-merge", "chronicle-save-settings", "chronicle-restore", "chronicle-purge", "save-thread", "delete-thread", "thread-status", "save-episode", "delete-episode", "stale-ack", "branch-hold-keep", "branch-hold-drop", "save-candidates", "apply-review", "apply-health", "save-element-candidates", "save-draft", "save-element", "delete-item", "delete-element", "promise-status", "toggle-promise-done", "toggle-anchor-active", "anchor-move", "save-settings", "save-element-settings", "import-legacy", "undo-auto-review", "restore-memory-backup", "confirm-quarantined-memory", "wiki-save", "wiki-candidate-save", "wiki-proposal-apply", "wiki-delete", "wiki-save-settings", "wiki-toggle", "parse-raw-recovery"]);
   async function handleClick(event) {
+    // Shift 범위 토글: 체크 변경(change)에는 shiftKey가 없어 클릭 시각을 기억해 둔다.
+    // 줄 글자를 Shift로 누르면 브라우저가 체크를 바꾸지 않으므로(Chromium) 여기서 직접 바꾼다.
+    if (event.shiftKey) {
+      const box = event.target?.closest?.(".mmc-source-row")?.querySelector?.("input[data-source-id]");
+      if (box && event.target === box) state.sourceShiftAt = Date.now();
+      else if (box && !event.target.closest?.("button")) {
+        event.preventDefault();
+        if (!box.disabled && !state.busy && !state.syncing && !state.actionPending) { toggleSourceRow(String(box.dataset.sourceId || ""), !box.checked, true); render(); }
+        return;
+      }
+    }
     const actionEl = event.target.closest?.("[data-action]");
     if (!actionEl) return;
     const action = actionEl.dataset.action;
+    if (action === "source-preview-toggle") {
+      event.preventDefault();
+      const row = actionEl.closest(".mmc-source-row");
+      const open = !row?.classList.contains("is-expanded");
+      row?.classList.toggle("is-expanded", open);
+      actionEl.setAttribute("aria-expanded", String(open));
+      actionEl.textContent = open ? "접기" : "더 보기";
+      return;
+    }
     if (action === "chronicle-cancel" && state.chronicleJob) {
       state.chronicleJob.cancelled = true;
       state.chronicleJob = null;
@@ -9105,7 +9354,16 @@ When current and historical facts differ, current facts take precedence.`;
       }
       if (action === "open-source") { await openSource(actionEl.dataset.source, actionEl.dataset.target); return; }
       if (action === "source-select-all") { state.sourceRows.forEach((row) => state.sourceSelected.add(String(row.id))); render(); return; }
-      if (action === "source-clear") { state.sourceSelected.clear(); render(); return; }
+      if (action === "source-clear") { state.sourceSelected.clear(); state.sourceRanges = []; state.sourceLastClickId = ""; render(); return; }
+      if (action === "source-select-recent") {
+        const want = Math.max(1, Math.min(SOURCE_MAX_MESSAGES, Math.floor(Number(document.getElementById("mmc-source-recent-n")?.value) || state.sourceRecentN || 20)));
+        const got = await selectRecentSource(want);
+        if (got < want) toast(`읽을 수 있는 메시지가 ${got}개라 ${got}개만 골랐어요.`);
+        render(); return;
+      }
+      if (action === "source-range-add") { state.sourceRanges = [...safeArray(state.sourceRanges), { start: "", end: "" }]; render(); document.querySelector(`[data-source-range="${state.sourceRanges.length - 1}"][data-range-part="start"]`)?.focus?.(); return; }
+      if (action === "source-range-remove") { const i = Number(actionEl.dataset.rangeIndex); state.sourceRanges = safeArray(state.sourceRanges).filter((_, j) => j !== i); render(); return; }
+      if (action === "source-load-older") { await loadOlderSourceMessages(); return; }
       if (action === "source-local") { makeLocalDraft(); return; }
       if (action === "source-local-promise") { makeLocalDraft("promise"); return; }
       if (action === "source-local-anchor") { makeLocalDraft("anchor"); return; }
@@ -9360,8 +9618,29 @@ When current and historical facts differ, current facts take precedence.`;
       }
       if (event.target?.matches?.("[data-source-id]")) {
         const id = String(event.target.dataset.sourceId || "");
-        if (event.target.checked) state.sourceSelected.add(id); else state.sourceSelected.delete(id);
+        const shift = Date.now() - (Number(state.sourceShiftAt) || 0) < 1000;
+        state.sourceShiftAt = 0;
+        toggleSourceRow(id, event.target.checked, shift);
         render(); return;
+      }
+      if (event.target?.matches?.("[data-source-range]")) {
+        const i = Number(event.target.dataset.sourceRange);
+        const part = event.target.dataset.rangePart === "end" ? "end" : "start";
+        const list = safeArray(state.sourceRanges).slice();
+        if (!list[i]) return;
+        list[i] = { ...list[i], [part]: String(event.target.value || "").trim() };
+        state.sourceRanges = list;
+        // 칸을 옮겨 가며 적는 중에 다시 그려도 지금 적는 칸과 적던 값을 잃지 않게, 포커스가 옮겨진 뒤 그리고 되돌린다.
+        await new Promise((resolve) => setTimeout(resolve, 0));
+        const focus = captureSourceFocus();
+        // 아직 불러오지 않은 앞 번호면 상한 안에서 더 불러온 뒤 다시 그린다.
+        if (!(await ensureSourceRangesLoaded())) render();
+        restoreSourceFocus(focus);
+        return;
+      }
+      if (event.target?.id === "mmc-source-recent-n") {
+        state.sourceRecentN = Math.max(1, Math.min(SOURCE_MAX_MESSAGES, Math.floor(Number(event.target.value) || 20)));
+        return;
       }
       if (event.target?.matches?.("[data-candidate-index]")) {
         const id = String(event.target.dataset.candidateIndex || "");
