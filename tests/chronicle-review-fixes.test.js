@@ -68,12 +68,21 @@ test('host messages API exposes the restriction, so older readers (대화에서/
     assert.deepEqual(c.readableMessages(listed, 'source').map(r => r.content), [chat[0].mes, chat[2].mes]);
 });
 
-test('a model answer of knownBy all cannot launder a hidden line as public (group fixture)', () => {
+test('a line hidden from Bo never reaches the summary request (public projection, group fixture)', () => {
     const { c } = runner();
     const lines = c.promptLinesFor(rows, 0, 2);
-    assert.deepEqual(lines[1].hiddenFrom, ['Bo.png']);
-    assert.match(c.buildScenePrompt(lines, { text: '', refs: [] })[1].content, /\[2\] Mina \(not seen by Bo\): Mina whispers/);
-    const cand = c.parseSceneResponse(publicReply(), lines);
+    assert.deepEqual(lines.map(l => l.index), [0, 2], 'the hidden line is left out');
+    assert.doesNotMatch(c.buildScenePrompt(lines, { text: '', refs: [] })[1].content, /whispers|not seen by/);
+});
+// A candidate stored by the previous version (hidden line sent with a label) keeps its narrowed scope.
+const legacyLines = () => [
+    { n: 1, index: 0, speaker: 'Hana', content: chat[0].mes, hidden: false, hiddenFrom: [] },
+    { n: 2, index: 1, speaker: 'Mina', content: chat[1].mes, hidden: true, hiddenFrom: ['Bo.png'] },
+    { n: 3, index: 2, speaker: 'Bo', content: chat[2].mes, hidden: false, hiddenFrom: [] },
+];
+test('a stored candidate built from a hidden line cannot be laundered as public by a model answer of all', () => {
+    const { c } = runner();
+    const cand = c.parseSceneResponse(publicReply(), legacyLines());
     assert.equal(cand.scopeNeedsReview, true);
     assert.deepEqual(cand.event.knownByIds, ['Mina.png'], 'event drawn from the whole range excludes Bo');
     assert.deepEqual(cand.event.hiddenFrom, ['Bo.png']);
@@ -93,8 +102,7 @@ test('widening a hidden-line scope to include Bo or everyone needs explicit conf
     const base = { 'mmc-chr-fact-keep-0': true, 'mmc-chr-fact-keep-1': true, 'mmc-chr-public-ok': true };
     const make = (checked, scopes) => { const r = runner({ dom: fakeDom({ values, checked: { ...base, ...checked }, scopes }) }); return r; };
     const { c } = make({}, {});
-    const lines = c.promptLinesFor(rows, 0, 2);
-    const rv = { candidate: c.parseSceneResponse(publicReply(), lines) };
+    const rv = { candidate: c.parseSceneResponse(publicReply(), legacyLines()) };
     const scopesWide = { 'chrdraft-event|0': ['Mina.png'], 'chrdraft-fact|0': ['Mina.png', 'Bo.png'], 'chrdraft-fact|1': [] };
     const wide = make({}, scopesWide);
     await assert.rejects(async () => wide.c.captureChronicleCandidate(rv), /숨김 대상|숨긴 줄/);
@@ -106,16 +114,16 @@ test('widening a hidden-line scope to include Bo or everyone needs explicit conf
     assert.deepEqual(narrow.c.captureChronicleCandidate(rv).event.knownBy, ['Mina.png']);
 });
 
-test('restriction survives storage: a reloaded review keeps hiddenFrom', async () => {
-    const { c } = runner();
+test('the stored candidate records how many hidden lines were left out of the request', async () => {
+    const { c, generated } = runner();
     c.state.chronicleDraft = { start: 0, end: 2, connectionId: 'current', maxTokens: 900 };
     await c.runChronicleScene();
+    assert.doesNotMatch(JSON.stringify(generated()[0].body.messages), /whispers/);
     const stored = c.chronicleOf().reviews[0];
     assert.ok(stored, 'review stored');
     const again = c.reviewCandidate(stored);
-    assert.deepEqual(again.event.hiddenFrom, ['Bo.png']);
-    assert.deepEqual(again.facts[0].hiddenFrom, ['Bo.png']);
-    assert.deepEqual(again.facts[0].knownByIds, ['Mina.png']);
+    assert.equal(again.excludedHidden, 1);
+    assert.deepEqual(again.event.hiddenFrom, []);
 });
 
 // ── C2 ──

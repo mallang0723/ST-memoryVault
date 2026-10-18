@@ -29,12 +29,12 @@ test('the constant budget is a cap: recent records that do not fit fall back to 
     assert.deepEqual(modes(r), { A: 'keyword:older', B: 'keyword:older', C: 'keyword:budget', D: 'constant:recent', E: 'constant:recent' });
 });
 
-test('dependency closure: a constant delta pulls in the record it was written against, or drops to keyword', () => {
+test('dependency closure: a constant delta pulls in the record it was written against, or is held (never keyword-only)', () => {
     const eps = five();
     eps[4].chronicle.contextRefs = [{ id: 'A', revision: 1 }];
     assert.deepEqual(modes(planChronicleInjection(eps, rows, settings(), () => 300)).A, 'constant:dependency');
     const tight = planChronicleInjection(eps, rows, settings({ budgetTokens: 1250, oldDetailTokens: 700 }), () => 300);
-    assert.equal(modes(tight).E, 'keyword:dependency-budget');
+    assert.equal(modes(tight).E, 'held:dependency-budget');
     assert.equal(modes(tight).A, 'keyword:older');
     // An archived reference is served by its live merged parent.
     const merged = five();

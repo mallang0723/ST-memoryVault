@@ -1,7 +1,7 @@
 import { DATA_KEY } from './migration.js';
 import { WORLD_KEY, compileWorldInfo, compileLegacyWorldInfo, removeManagedEntries } from './world-info.js';
 import { generateIsolated, listSummaryConnections } from './isolated-generation.js';
-import { stMessageRow, sliceHash, blockedChronicleIds } from './chronicle.js';
+import { stMessageRow, sliceHash, blockedChronicleIds, evaluateChronicle, injectionDependencies } from './chronicle.js';
 
 export const HOST_KEY = 'memoryVaultHost';
 export const SETTINGS_KEY = 'memoryVault';
@@ -454,12 +454,31 @@ export function createHost({ getContext, fetchImpl = globalThis.fetch, worldInfo
             // Generation-time guard: a chronicle scene/chapter whose source, dependency or
             // children changed (or that is archived under a merged parent) is never sent,
             // even if the lorebook has not been re-synced yet.
-            const blocked = blockedChronicleIds(data.episodes, (ctx.chat || []).map(stMessageRow));
+            const rows = (ctx.chat || []).map(stMessageRow);
+            const evaluation = evaluateChronicle(data.episodes, rows);
+            const blocked = blockedChronicleIds(data.episodes, rows, evaluation);
             const episodeOf = entry => String(book.entries?.[entry.extensions?.[WORLD_KEY]?.sourceEntryId]?.dynamicState?.memoryCabinetEpisodeId || '');
-            lists.chatLore.push(...Object.values(compiled.entries).filter(entry => !entry.disable)
+            let kept = Object.values(compiled.entries).filter(entry => !entry.disable)
                 .filter(entry => !blocked.has(episodeOf(entry)))
-                .filter(entry => !entry.characterFilter.names.length || entry.characterFilter.names.includes(responder))
-                .map(entry => ({ ...entry, world: files.get(book.id) || book.id })));
+                .filter(entry => !entry.characterFilter.names.length || entry.characterFilter.names.includes(responder));
+            // A record written against earlier records goes in only when every one of them is in this
+            // request as a constant entry sorted ahead of it (ST stops at the first budget overflow in
+            // order, so a dependency ahead of its dependent is never cut while the dependent stays).
+            const needs = injectionDependencies(data.episodes, rows, evaluation);
+            for (let changed = true; changed;) {
+                changed = false;
+                const best = new Map();
+                for (const entry of kept) {
+                    const id = episodeOf(entry);
+                    if (id && entry.constant) best.set(id, Math.max(best.get(id) ?? -Infinity, entry.order));
+                }
+                const next = kept.filter(entry => {
+                    const deps = needs.get(episodeOf(entry));
+                    return !deps || [...deps].every(dep => (best.get(dep) ?? -Infinity) > entry.order);
+                });
+                if (next.length !== kept.length) { kept = next; changed = true; }
+            }
+            lists.chatLore.push(...kept.map(entry => ({ ...entry, world: files.get(book.id) || book.id })));
         } catch (error) { reportError(error); }
     }
 

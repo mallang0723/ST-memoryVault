@@ -257,6 +257,25 @@ try {
     await waitStates([A, B, D], 'approved');
     check('auto-merge (count 3, review ON) produced one pending candidate and changed nothing else');
 
+    // With that merge candidate left for later, the range view (new and regenerate) still opens; no model call.
+    const before = captures.length;
+    await act('chronicle-new').click();
+    await root.locator('.mmc-chronicle-layer').waitFor();
+    await idle();
+    assert.match(await root.locator('.mmc-chronicle-layer h3').innerText(), /구간 기록 만들기/);
+    await shot('range-with-merge-candidate-desktop');
+    await root.locator('.mmc-chronicle-layer [data-action="close-layer"]').first().click({ force: true });
+    await idle();
+    await root.locator(`[data-episode-id="${A}"] [data-action="chronicle-regenerate"]`).first().click();
+    await root.locator('.mmc-chronicle-layer').waitFor();
+    await idle();
+    assert.match(await root.locator('.mmc-chronicle-layer h3').innerText(), /다시 만들기/);
+    await root.locator('.mmc-chronicle-layer [data-action="close-layer"]').first().click({ force: true });
+    await idle();
+    assert.equal(captures.length, before, 'opening the range views made no model call');
+    assert.deepEqual(errors, []);
+    check('range view (new and regenerate) opens while an auto-merge candidate waits for review');
+
     // Mobile.
     await page.setViewportSize({ width: 390, height: 844 });
     await page.waitForTimeout(300);

@@ -9,11 +9,11 @@ export function mountMemoryVault(host) {
     normalizeEpisodeChronicle, normalizeChronicleState, assertChronicleSize, holdImportedChronicle, rangeAfterCut,
     buildRange, locateRange, rangesOverlap, completedResponses, normalizeReview, strongHash,
     evaluateChronicle, chronicleFrontier, rowHiddenFrom, assertReviewRoom, MAX_REVIEWS, planAutoScene, planChronicleInjection, validateMerge, planAutoMerge, applyMerge, undoMerge, mergeInputHash, scopeSignature,
-    normalizeSettings, MERGE_PROMPT_VERSION,
+    normalizeSettings, MERGE_PROMPT_VERSION, mergeAudience, STRUCTURAL_REASONS, isStandalone, hasDependencies, dependencyClosure,
     RANGE_SUMMARY_MAX, SCENE_PROMPT_VERSION,
   } = chronicleLib;
 
-  const VERSION = "2.2.0-st.1";
+  const VERSION = "2.2.0-st.2";
   const AM_SCENE_SOURCE = "unsupported-advanced-memory-scene";
   const DATA_KEY = "memoryCabinetV1";
   const LEGACY_PROMISE_KEY = "promiseKeeperV1";
@@ -5404,8 +5404,14 @@ When current and historical facts differ, current facts take precedence.`;
     for (const ep of liveEpisodes(data)) {
       if (!episodeInjectable(ep, evaluation)) continue;
       const node = episodeMode(ep) !== "legacy";
-      // 연대기 기록: 최근 N/J개(+의존 기록)는 상시, 나머지는 키워드. 행이 없으면 키워드로만 둔다.
-      const constant = node && injection?.get(ep.id)?.mode === "constant";
+      // 연대기 기록: 최근 N/J개(+의존 기록 전부)는 상시, 다른 기록에 기대지 않는 나머지는 키워드.
+      // 의존 기록을 이번 요청에 함께 넣지 못하는 기록은 넣지 않는다(보류). 원문을 아직 못 읽었으면
+      // 의존 관계를 확인할 수 없으니, 다른 기록에 기대는 기록은 넣지 않는다.
+      const planned = node ? injection?.get(ep.id) : null;
+      if (node && injection && (!planned || planned.mode === "held")) continue;
+      if (node && !injection && hasDependencies(safeArray(parseRecord(data).episodes), ep.id)) continue;
+      const constant = node && planned?.mode === "constant";
+      const depth = constant ? Number(planned.depth) || 0 : 0;
       const keys = normalizeTextList([...ep.keywords, ep.background.place], 8, 60).filter((key) => key.length >= 2);
       if (!keys.length && !constant) continue;
       const eventScope = normalizeKnownBy(ep.event.knownBy);
@@ -5426,11 +5432,11 @@ When current and historical facts differ, current facts take precedence.`;
       for (const fact of publicFacts.slice(0, episodeMode(ep) === "chapter" ? 10 : 6)) mainLines.push(`- 지금도 유효한 사실: ${truncate(fact.text, 200)}`);
       if (eventScope.length) mainLines.splice(1, 0, `이 장면은 ${knownByLabel(eventScope)}만 알고 있다. 모르는 인물이 알고 있는 것처럼 굴게 하지 마라.`);
       mainLines.push("이미 일어난 일이다. 관련될 때만 자연스럽게 반영하고 목록을 낭독하지 마라.");
-      plans.push({ episodeId: ep.id, scopeKey: "main", keys, scope: eventScope, content: mainLines.join("\n"), enabled: !eventScope.length || effective, title: ep.title, constant });
+      plans.push({ episodeId: ep.id, scopeKey: "main", keys, scope: eventScope, content: mainLines.join("\n"), enabled: !eventScope.length || effective, title: ep.title, constant, depth });
       for (const [key, group] of groups) {
         const scope = eventScope.length ? group.scope.filter((id) => eventScope.includes(id)) : group.scope;
         if (!scope.length) continue;
-        plans.push({ episodeId: ep.id, scopeKey: key, keys, scope, title: ep.title, enabled: effective, constant,
+        plans.push({ episodeId: ep.id, scopeKey: key, keys, scope, title: ep.title, enabled: effective, constant, depth,
           content: [head, `아래 사실은 ${knownByLabel(scope)}만 알고 있다. 모르는 인물이 알고 있는 것처럼 굴게 하지 마라.`, ...group.facts.slice(0, 6).map((fact) => `- ${truncate(fact.text, 200)}`)].join("\n") });
       }
     }
@@ -5457,7 +5463,9 @@ When current and historical facts differ, current facts take precedence.`;
       keys: plan.keys, secondaryKeys: [], enabled: dataEnabled && plan.enabled,
       constant: plan.constant === true, selective: false, probability: null, scanDepth: null,
       matchWholeWords: false, caseSensitive: false, useRegex: false,
-      position: 0, depth: 4, order: plan.constant ? 48 : 47, role: "system",
+      // 낮은 order가 먼저 들어간다(로어북 순서 1000-order). 의존 기록은 그 기록에 기대는 기록보다 항상 앞이라,
+      // 로어북 예산이 넘쳐 뒤쪽이 잘려도 의존 기록 없이 delta만 남지 않는다.
+      position: 0, depth: 4, order: plan.constant ? 48 + (Number(plan.depth) || 0) : 47, role: "system",
       preventRecursion: true, excludeRecursion: false, delayUntilRecursion: false, excludeFromVectorization: true,
       tag: EPISODE_ENTRY_TAG,
       dynamicState: { memoryCabinetChatId: String(chat.id), memoryCabinetEpisodeId: plan.episodeId, memoryCabinetScope: plan.scopeKey, managedBy: LOREBOOK_TAG, kind: "episode" },
@@ -5718,6 +5726,7 @@ When current and historical facts differ, current facts take precedence.`;
   const CHRONICLE_REASON_LABEL = {
     "source-changed": "원문 변경 · 주입 보류", "dependency-changed": "참고한 기록 변경 · 주입 보류", "child-changed": "갱신 필요 · 주입 보류",
     imported: "가져온 기록 · 원문 대조 필요", ambiguous: "같은 원문이 여러 곳 · 보류", "range-invalid": "구간 정보 손상 · 보류", "range-after-cut": "분기 뒤 구간 · 보류",
+    "graph-invalid": "합본 연결이 맞지 않음 · 보류", "coverage-invalid": "하위 구간이 이어지지 않음 · 보류", "coverage-overlap": "다른 기록과 구간 겹침 · 보류", cycle: "합본 연결 순환 · 보류",
   };
   function chronicleStateOf(ep, evaluation = chronicleEvaluation()) {
     const res = evaluation?.get(ep.id);
@@ -5741,6 +5750,7 @@ When current and historical facts differ, current facts take precedence.`;
     if (res.state === "archived" && ["stale", "held"].includes(res.own)) chips.push(`<span class="mmc-chip is-warn">${esc(CHRONICLE_REASON_LABEL[res.reason] || "갱신 필요")}</span>`);
     if (res.state === "approved" && res.loc?.status === "moved") chips.push('<span class="mmc-chip is-soft">앞쪽 메시지 변동 · 원문 그대로</span>');
     if (c.revision > 1) chips.push(`<span class="mmc-chip is-soft">${c.revision}판</span>`);
+    if (isStandalone(c)) chips.push('<span class="mmc-chip is-soft">자립 확인됨</span>');
     return chips.join("");
   }
   function sceneActions(ep, evaluation = chronicleEvaluation()) {
@@ -5748,12 +5758,15 @@ When current and historical facts differ, current facts take precedence.`;
     const id = esc(ep.id);
     if (res.state === "deleted") return `<button class="mmc-btn mmc-sm" data-action="chronicle-restore" data-id="${id}">되돌리기</button><button class="mmc-btn mmc-sm mmc-danger" data-action="chronicle-purge" data-id="${id}">영구 삭제</button>`;
     if (res.state === "undone") return "";
-    const recheck = ["stale", "held"].includes(res.own || res.state) && res.reason !== "source-changed" && res.reason !== "range-invalid"
+    const recheck = ["stale", "held"].includes(res.own || res.state) && res.reason !== "source-changed" && res.reason !== "range-invalid" && res.reason !== "cycle" && !STRUCTURAL_REASONS.includes(res.reason)
       ? `<button class="mmc-btn mmc-sm" data-action="chronicle-reconfirm" data-id="${id}">${res.reason === "imported" ? "원문 대조" : "다시 확인"}</button>` : "";
     const undo = ep.chronicle.mode === "chapter" ? `<button class="mmc-btn mmc-sm" data-action="chronicle-undo-merge" data-id="${id}">합치기 취소</button>` : "";
+    // 앞 기록을 참고해 쓴 기록: 사용자가 그 기록 없이도 읽힌다고 확인하면 의존 기록 없이 넣을 수 있다.
+    const standalone = res.state === "approved" && !isStandalone(ep.chronicle) && evaluation && dependencyClosure(safeArray(parseRecord(state.currentData).episodes), ep.id, evaluation).deps.size
+      ? `<button class="mmc-btn mmc-sm" data-action="chronicle-standalone" data-id="${id}" title="참고한 앞 기록 없이도 이 기록만으로 읽히는지 직접 확인했을 때 누르세요">앞 기록 없이 읽힘 확인</button>` : "";
     // 보관된 장면은 편집만 한다(재생성은 겹침 검사와 충돌). 보관된 합본은 아래부터 다시 만들 수 있게 재생성을 둔다.
     const regen = res.state === "archived" && ep.chronicle.mode !== "chapter" ? "" : `<button class="mmc-btn mmc-sm" data-action="chronicle-regenerate" data-id="${id}">${SVG.spark}<span>재생성</span></button>`;
-    return `${recheck}${regen}${undo}`;
+    return `${recheck}${standalone}${regen}${undo}`;
   }
 
   // 지금 원문·의존 관계로 다시 판정한 결과를 저장한다. 승인 → 갱신 필요/보류 전환만 자동으로 한다.
@@ -5763,7 +5776,7 @@ When current and historical facts differ, current facts take precedence.`;
     const pending = (data) => {
       const evaluation = evaluateChronicle(safeArray(data?.episodes), state.chronicleRows);
       return safeArray(data?.episodes).filter((ep) => episodeMode(ep) !== "legacy" && !ep.replacedBy && ep.chronicle.status === "approved")
-        .map((ep) => [ep, evaluation.get(ep.id)]).filter(([, res]) => res && (res.own === "stale" || res.own === "held"));
+        .map((ep) => [ep, evaluation.get(ep.id)]).filter(([, res]) => res && (res.own === "stale" || res.own === "held") && !STRUCTURAL_REASONS.includes(res.reason));
     };
     if (!pending(normalizeData(state.currentData)).length) return false;
     const data = await freshOwnedData();
@@ -5782,6 +5795,9 @@ When current and historical facts differ, current facts take precedence.`;
     if (!ep) return;
     const c = ep.chronicle;
     const evaluation = evaluateChronicle(list, rows);
+    // 저장된 연결(합본↔하위·구간 겹침)이 맞지 않으면 다시 확인으로 살리지 않는다. 합치기 취소·삭제로 구조를 먼저 고친다.
+    const structural = evaluation.get(id)?.reason;
+    if (STRUCTURAL_REASONS.includes(structural) || structural === "cycle") throw new Error("기록 사이 연결(합본 구조나 구간 겹침)이 맞지 않아 다시 확인할 수 없어요. 합치기 취소나 겹치는 기록 정리로 구조를 먼저 고쳐 주세요.");
     let loc = null;
     if (c.mode === "range") {
       loc = locateRange(rows, c.range);
@@ -5803,6 +5819,17 @@ When current and historical facts differ, current facts take precedence.`;
       contextRefs: keptRefs.map((ref) => ({ ...ref, revision: byId.get(ref.id).chronicle.revision })),
       ...(c.mode === "chapter" ? { childRefs: c.childRefs.map((ref) => ({ ...ref, revision: byId.get(ref.id).chronicle.revision })) } : { range: { ...c.range, startIndex: loc.startIndex } }),
     };
+    data.episodes = list;
+    await persistData(data);
+    render();
+  }
+  async function confirmChronicleStandalone(id) {
+    const data = await freshOwnedData();
+    const list = safeArray(data.episodes).map(normalizeEpisode).filter(Boolean);
+    const ep = list.find((row) => row.id === id && episodeMode(row) !== "legacy");
+    if (!ep) return;
+    if (!window.confirm(`'${truncate(ep.title, 30)}'이 참고한 앞 기록 없이도 이 기록만으로 읽히는지 직접 확인했나요?\n확인하면 앞 기록이 이번 요청에 없어도 이 기록을 넣을 수 있어요. 내용을 고치면(새 판) 확인은 풀려요.`)) return;
+    ep.chronicle = { ...ep.chronicle, standaloneRevision: ep.chronicle.revision };
     data.episodes = list;
     await persistData(data);
     render();
@@ -5843,11 +5870,19 @@ When current and historical facts differ, current facts take precedence.`;
   }
 
   // ── 구간 선택 ──
+  // 요청 범위: 채팅의 모든 인물이 볼 수 있는 줄만 보낸다(공개 projection). 일부 인물에게 숨긴 줄은
+  // 요청에서 빼고, 그 내용은 이 기록에 담지 않는다. 원문은 그대로 두고 구간 지문에는 포함된다.
+  function hiddenLineCount(rows, start, end) {
+    let n = 0;
+    for (let i = start; i <= end; i += 1) if (rows[i] && rowHiddenFrom(rows[i]).length && ["user", "assistant"].includes(String(rows[i].role || "")) && String(rows[i].content || "").trim()) n += 1;
+    return n;
+  }
   function promptLinesFor(rows, start, end) {
     const lines = [];
     for (let i = start; i <= end; i += 1) {
       const row = rows[i];
       if (!row || !["user", "assistant"].includes(String(row.role || "")) || !String(row.content || "").trim()) continue;
+      if (rowHiddenFrom(row).length) continue;
       const speaker = String(row.name || (row.role === "user" ? "User" : "Character")).replace(/\s+/g, " ").trim().slice(0, 80);
       lines.push({ n: lines.length + 1, index: i, speaker, content: labelCharacterConditions(String(row.content || "").trim()), hidden: messageHiddenFromSomeone(row), hiddenFrom: rowHiddenFrom(row) });
     }
@@ -5884,8 +5919,9 @@ When current and historical facts differ, current facts take precedence.`;
     return { text: parts.join("\n"), refs };
   }
   function buildScenePrompt(lines, prior) {
-    // 일부 인물에게 숨긴 줄은 그 사실을 함께 알려 아는 인물 판단에 쓰게 한다(서비스가 범위를 다시 강제한다).
-    const body = lines.map((line) => `[${line.n}] ${line.speaker}${line.hiddenFrom?.length ? ` (not seen by ${line.hiddenFrom.map(characterName).join(", ")})` : ""}: ${line.content}`).join("\n");
+    // 숨긴 줄은 요청에 절대 넣지 않는다(표식만 붙여 보내는 것은 보호가 아니다).
+    if (lines.some((line) => line.hidden || line.hiddenFrom?.length)) throw new Error("일부 인물에게 숨긴 줄은 요약 요청에 넣지 않아요. 모델을 호출하지 않았어요.");
+    const body = lines.map((line) => `[${line.n}] ${line.speaker}: ${line.content}`).join("\n");
     const user = `${prior.text ? `EARLIER SCENES (reference only):\n${prior.text}\n\n` : ""}LINES:\n${body}`;
     return [{ role: "system", content: SCENE_SYSTEM_PROMPT }, { role: "user", content: user }];
   }
@@ -5899,7 +5935,7 @@ When current and historical facts differ, current facts take precedence.`;
     const messages = buildScenePrompt(lines, prior);
     const tokens = messages.reduce((sum, m) => sum + estimateTokens(m.content), 0);
     const overlaps = activeNodeLocs(data).filter(({ ep, loc }) => ep.id !== state.chronicleDraft?.regenerateId && rangesOverlap(loc, { startIndex: start, endIndex: end })).map(({ ep }) => ep);
-    return { start, end, count: end - start + 1, lines, prior, messages, tokens, overlaps, responses: completedResponses(rows, start, end), hidden: lines.filter((l) => l.hidden).length };
+    return { start, end, count: end - start + 1, lines, prior, messages, tokens, overlaps, responses: completedResponses(rows, start, end), excludedHidden: hiddenLineCount(rows, start, end) };
   }
   function nextChronicleStart(data) {
     let next = 0;
@@ -5954,7 +5990,8 @@ When current and historical facts differ, current facts take precedence.`;
     const connections = state.chronicleConnections.map((row) => `<option value="${esc(row.id)}" ${row.id === d.connectionId ? "selected" : ""} ${row.supported ? "" : "disabled"}>${esc(row.label)}${row.model ? ` · ${esc(row.model)}` : ""}${row.supported ? "" : ` — ${esc(row.reason)}`}</option>`).join("");
     const conn = state.chronicleConnections.find((row) => row.id === d.connectionId);
     const tooBig = info && info.tokens > CHRONICLE_INPUT_TOKEN_LIMIT;
-    const sameReview = info && chronicleOf().reviews.find((rv) => rv.status === "ready" && rv.range.rangeHash === buildRangeSafe(info.start, info.end)?.rangeHash);
+    // 합본 후보에는 구간(range)이 없다. 같은 구간의 장면 후보만 비교한다.
+    const sameReview = info && chronicleOf().reviews.find((rv) => rv.kind === "scene" && rv.status === "ready" && rv.range?.rangeHash === buildRangeSafe(info.start, info.end)?.rangeHash);
     const regen = d.regenerateId ? rangeScenes().find((ep) => ep.id === d.regenerateId) : null;
     const canRun = info && info.lines.length && conn?.supported && !tooBig && !sameReview;
     return `<div class="mmc-layer-backdrop" data-action="close-layer"><section class="mmc-layer mmc-chronicle-layer" data-layer-stop>
@@ -5963,7 +6000,7 @@ When current and historical facts differ, current facts take precedence.`;
         ${regen ? `<div class="mmc-chr-note">'${esc(truncate(regen.title, 40))}'의 새 후보를 만들어요. 승인하기 전까지 기존 기록은 그대로 주입돼요.</div>` : ""}
         ${d.note ? `<div class="mmc-chr-note is-warn">${esc(d.note)}</div>` : ""}
         <div class="mmc-field-row mmc-chr-range-inputs"><label class="mmc-field"><span>시작 메시지 번호</span><input id="mmc-chr-start" type="number" min="1" max="${rows.length}" value="${info ? info.start + 1 : 1}"></label><label class="mmc-field"><span>끝 메시지 번호 <small>양끝 포함</small></span><input id="mmc-chr-end" type="number" min="1" max="${rows.length}" value="${info ? info.end + 1 : rows.length}"></label></div>
-        ${info ? `<div class="mmc-chr-summary"><b>메시지 ${rangeLabel(info.start, info.end)} · ${info.count}개</b><small>완료 응답 ${info.responses}개 · 요약에 쓰는 줄 ${info.lines.length}개 · 추정 입력 약 ${info.tokens.toLocaleString()} 토큰 · 모델 호출 1회</small>${info.prior.refs.length ? `<small>중복을 줄이려고 앞선 공개 장면 ${info.prior.refs.length}개의 본문을 참고로 함께 보내요.</small>` : ""}${info.hidden ? `<small class="mmc-scope-warn">일부 인물에게만 보이는 줄 ${info.hidden}개가 있어요. 승인 전에 아는 인물을 꼭 확인해 주세요.</small>` : ""}${info.overlaps.length ? `<small class="mmc-scope-warn">이미 기록된 구간과 겹쳐요: ${esc(info.overlaps.map((ep) => `${sceneRangeText(ep)} ${truncate(ep.title, 20)}`).join(", "))}. 승인할 때 교체할지 정해요.</small>` : ""}${sameReview ? '<small class="mmc-scope-warn">같은 구간의 후보가 이미 검토 대기 중이에요. 그 후보를 먼저 확인해 주세요.</small>' : ""}${tooBig ? `<small class="mmc-scope-warn">구간이 너무 길어요(약 ${CHRONICLE_INPUT_TOKEN_LIMIT.toLocaleString()} 토큰 이하). 구간을 나누어 주세요.</small>` : ""}</div>` : ""}
+        ${info ? `<div class="mmc-chr-summary"><b>메시지 ${rangeLabel(info.start, info.end)} · ${info.count}개</b><small>완료 응답 ${info.responses}개 · 요약에 쓰는 줄 ${info.lines.length}개 · 추정 입력 약 ${info.tokens.toLocaleString()} 토큰 · 모델 호출 1회</small>${info.prior.refs.length ? `<small>중복을 줄이려고 앞선 공개 장면 ${info.prior.refs.length}개의 본문을 참고로 함께 보내요.</small>` : ""}${info.excludedHidden ? `<small class="mmc-scope-warn">일부 인물에게 숨긴 줄 ${info.excludedHidden}개는 요청에서 빼요. 그 내용은 이 기록에 담기지 않아요(원문은 그대로).</small>` : ""}${info.overlaps.length ? `<small class="mmc-scope-warn">이미 기록된 구간과 겹쳐요: ${esc(info.overlaps.map((ep) => `${sceneRangeText(ep)} ${truncate(ep.title, 20)}`).join(", "))}. 승인할 때 교체할지 정해요.</small>` : ""}${sameReview ? '<small class="mmc-scope-warn">같은 구간의 후보가 이미 검토 대기 중이에요. 그 후보를 먼저 확인해 주세요.</small>' : ""}${tooBig ? `<small class="mmc-scope-warn">구간이 너무 길어요(약 ${CHRONICLE_INPUT_TOKEN_LIMIT.toLocaleString()} 토큰 이하). 구간을 나누어 주세요.</small>` : ""}</div>` : ""}
         <div class="mmc-field-row"><label class="mmc-field"><span>요약에 쓸 연결</span><select id="mmc-chr-conn">${connections || '<option value="">사용할 수 있는 연결 없음</option>'}</select>${conn && !conn.supported ? `<small class="mmc-scope-warn">${esc(conn.reason)}</small>` : ""}</label><label class="mmc-field"><span>출력 한도 <small>토큰</small></span><input id="mmc-chr-max" type="number" min="200" max="8192" step="100" value="${esc(d.maxTokens || 1200)}"></label></div>
         <div class="mmc-chr-list">${from > 0 ? `<button type="button" class="mmc-btn mmc-sm mmc-ghost" data-action="chronicle-more">이전 메시지 더 보기 (#${Math.max(1, from - 99)}~)</button>` : ""}${list}</div>
         ${info ? `<details class="mmc-chr-preview"><summary>모델에 보낼 내용 보기</summary>${info.messages.map((m) => `<pre data-role="${esc(m.role)}">${esc(m.content)}</pre>`).join("")}</details>` : ""}
@@ -6160,6 +6197,7 @@ When current and historical facts differ, current facts take precedence.`;
     let review;
     try {
       const candidate = parseSceneResponse(result.content, info.lines);
+      if (info.excludedHidden) candidate.excludedHidden = info.excludedHidden;
       review = normalizeReview({ ...base, status: result.sourceChanged ? "held" : "ready", reason: result.sourceChanged ? "요청 중 구간의 원문·스와이프·참여 인물이 바뀌었어요. 이 후보는 승인할 수 없어요." : "", generation: done, candidate });
     } catch (error) {
       review = normalizeReview({ ...base, status: "failed", reason: String(error?.message || error), generation: done, rawText: String(result.content || "") });
@@ -6175,6 +6213,7 @@ When current and historical facts differ, current facts take precedence.`;
   // ── 검토 ──
   // 저장된 후보는 다시 정규화해서 쓴다(요약 상한은 구간 기록 기준).
   const MAX_MERGE_PARTS = 24;
+  const MAX_RANGE_LINES_NOTE = 2000;
   function reviewCandidate(rv) {
     if (!isRecord(rv?.candidate)) return null;
     const raw = rv.candidate;
@@ -6186,6 +6225,7 @@ When current and historical facts differ, current facts take precedence.`;
     cand.facts.forEach((fact, i) => { fact.lines = lineList(rawFacts[i]?.lines); fact.parts = lineList(rawFacts[i]?.parts).filter((n) => n <= MAX_MERGE_PARTS); fact.hiddenFrom = hiddenList(rawFacts[i]?.hiddenFrom); });
     cand.event.hiddenFrom = hiddenList(parseRecord(raw.event).hiddenFrom);
     cand.lines = lineList(raw.lines);
+    cand.excludedHidden = Math.max(0, Math.min(MAX_RANGE_LINES_NOTE, Number(raw.excludedHidden) || 0));
     return cand;
   }
   function chronicleReview(id = state.chronicleReviewId) { return chronicleOf().reviews.find((row) => row.id === id) || null; }
@@ -6225,6 +6265,7 @@ When current and historical facts differ, current facts take precedence.`;
         <label class="mmc-field"><span>핵심 행동·대사 <small>한 줄에 하나</small></span><textarea id="mmc-chr-actions" rows="3">${esc(c.event.keyActions.join("\n"))}</textarea></label>
         ${many || c.event.knownByIds.length ? `<div class="mmc-field"><span>이 장면을 아는 인물 <small>비우면 모두</small></span>${scopeControl("chrdraft-event", 0, c.event.knownByIds, { needsReview: c.scopeNeedsReview })}</div>` : ""}
         ${c.scopeNeedsReview ? `<label class="mmc-chr-keep"><input type="checkbox" id="mmc-chr-public-ok"><span>아는 인물을 고르지 않은 부분은 모두가 아는 것으로 저장</span></label>` : ""}
+        ${c.excludedHidden ? `<div class="mmc-chr-note is-warn">이 구간의 숨긴 줄 ${c.excludedHidden}개는 요청에서 뺐어요. 그 내용은 이 기록에 없어요(원문은 그대로).</div>` : ""}
         ${hiddenParts(c).length ? `<div class="mmc-chr-note is-warn">이 구간에는 ${esc(knownByLabel([...new Set(hiddenParts(c).flatMap((part) => part.hiddenFrom))]))}에게 숨긴 줄이 있어요. 그 인물은 기본 범위에서 뺐어요.</div><label class="mmc-chr-keep is-warn"><input type="checkbox" id="mmc-chr-widen-ok"><span>숨김 대상 인물도 알게 되는 범위(모두 공개 포함)로 저장하는 것을 확인했어요</span></label>` : ""}
         <div class="mmc-field"><span>사실 <small>근거 줄이 없는 사실은 기본으로 빠져요</small></span>${c.facts.map(factRow).join("") || '<small>사실 후보 없음</small>'}</div>
         <label class="mmc-field"><span>인물 변화 <small>한 줄에 '이름 | 행동 | 관계 변화 | 감정·태도 변화'</small></span><textarea id="mmc-chr-people" rows="3">${esc(c.characters.map((p) => [p.name, p.actions, p.relationChange, p.attitudeChange].join(" | ")).join("\n"))}</textarea></label>
@@ -6405,8 +6446,10 @@ When current and historical facts differ, current facts take precedence.`;
   }
   // 결과 미확정(시간 초과·새로고침) 후보는 비용이 났을 수 있으니 같은 노드를 다시 호출하지 않는다.
   function uncertainReview(rv) { return rv.status === "failed" && String(rv.reason || "").startsWith("결과 미확정"); }
-  function pendingMergeIds(chronicle = chronicleOf()) {
-    return new Set([...chronicle.reviews.filter((rv) => rv.kind === "merge" && (rv.status !== "failed" || uncertainReview(rv))), ...chronicle.jobs.map((job) => job.review).filter((rv) => rv?.kind === "merge")]
+  // 자동 실행은 실패 후보(서버 실패·응답 해석 실패·초과 요약 포함)가 남은 입력을 다시 호출하지 않는다.
+  // 같은 입력의 재호출은 사용자가 고른 '다시 생성'(또는 후보를 버린 뒤 직접 실행)뿐이다.
+  function pendingMergeIds(chronicle = chronicleOf(), { includeFailed = false } = {}) {
+    return new Set([...chronicle.reviews.filter((rv) => rv.kind === "merge" && (includeFailed || rv.status !== "failed" || uncertainReview(rv))), ...chronicle.jobs.map((job) => job.review).filter((rv) => rv?.kind === "merge")]
       .flatMap((rv) => safeArray(rv.childRefs).map((ref) => ref.id)));
   }
   // 자동 구간 기록: 켜져 있고 수동 승인 기록이 하나 이상 있을 때, 완료 응답 K개가 쌓이면 다음 구간을 1회 요청한다.
@@ -6416,12 +6459,13 @@ When current and historical facts differ, current facts take precedence.`;
     if (!chronicleRowsReady()) return { ok: false, reason: "rows" };
     const chronicle = chronicleOf(data);
     if (chronicle.jobs.length) return { ok: false, reason: "job" };
-    if (chronicle.reviews.some((rv) => rv.kind === "scene" && (rv.status !== "failed" || uncertainReview(rv)))) return { ok: false, reason: "review" };
+    // 실패 후보도 막는다. checkpoint가 그대로라 다음 이벤트가 같은 구간을 다시 계획하기 때문이다.
+    if (chronicle.reviews.some((rv) => rv.kind === "scene")) return { ok: false, reason: "review" };
     return planAutoScene(episodeList(data), state.chronicleRows, settings);
   }
   function autoSceneLabel(plan) {
     if (plan.ok) return `자동 기록 준비됨 · ${rangeLabel(plan.start, plan.end)}`;
-    return ({ off: "", rows: "", job: "자동 기록 대기 · 응답을 기다리는 요청이 있어요", review: "자동 기록 대기 · 검토 대기(또는 결과 미확정) 구간 후보를 먼저 정리해 주세요",
+    return ({ off: "", rows: "", job: "자동 기록 대기 · 응답을 기다리는 요청이 있어요", review: "자동 기록 대기 · 검토 대기·실패·결과 미확정 구간 후보를 먼저 정리해 주세요(실패한 구간은 자동으로 다시 요청하지 않아요)",
       gap: `자동 기록 멈춤 · ${rangeLabel(plan.gapStart ?? 0, plan.gapEnd ?? 0)} 공백을 직접 기록해 주세요`, "not-approved": "자동 기록 멈춤 · 갱신 필요·보류된 기록을 먼저 정리해 주세요",
       unlocated: "자동 기록 멈춤 · 원문을 찾지 못한 기록이 있어요", waiting: `다음 자동 기록까지 완료 응답 ${Math.max(0, (plan.need || 0) - (plan.have || 0))}개 남음` })[plan.reason] || "";
   }
@@ -6441,7 +6485,7 @@ When current and historical facts differ, current facts take precedence.`;
     if (!review) return null;
     const cand = review.status === "ready" ? reviewCandidate(review) : null;
     // 검토 끄기 + 공개·근거 있는·범위 확인이 필요 없는 후보만 바로 적용한다. 숨김 줄·제한·겹침은 검토로 남긴다.
-    if (cand && !settings.reviewBeforeApply && !cand.scopeNeedsReview && !hiddenParts(cand).length && scopeSignature({ event: { knownBy: cand.event.knownByIds }, facts: cand.facts.map((f) => ({ knownBy: f.knownByIds })) }) === "") {
+    if (cand && !settings.reviewBeforeApply && !cand.scopeNeedsReview && !hiddenParts(cand).length && !cand.excludedHidden && scopeSignature({ event: { knownBy: cand.event.knownByIds }, facts: cand.facts.map((f) => ({ knownBy: f.knownByIds })) }) === "") {
       try { await approveChronicleReview(review.id, { draft: draftFromCandidate(cand), auto: true }); toast("자동 구간 기록을 저장했어요."); await maybeAutoMerge(); }
       catch (error) { toast(`자동 기록 후보를 바로 저장하지 못해 검토로 남겼어요: ${error?.message || error}`, true); }
     } else toast("자동 구간 기록 후보가 검토를 기다려요.");
@@ -6454,7 +6498,10 @@ When current and historical facts differ, current facts take precedence.`;
     const kids = chapter.chronicle.childRefs.map((ref) => list.find((ep) => ep.id === ref.id));
     if (kids.some((ep) => !ep) || kids.some((ep) => evaluation.get(ep.id)?.own !== "approved")) return { ok: false, error: "하위 기록 중 갱신이 필요하거나 보류된 것이 있어요. 아래 기록부터 고친 뒤 재생성해 주세요." };
     const nodes = kids.map((ep) => ({ ep, c: ep.chronicle }));
-    return { ok: true, nodes: kids, level: chapter.chronicle.level, inputHash: mergeInputHash(nodes), restricted: kids.some((ep) => scopeSignature(ep) !== "") };
+    if (new Set(kids.map((ep) => scopeSignature(ep))).size > 1) return { ok: false, error: "아는 인물 범위가 다른 기록은 함께 합치지 않아요." };
+    const scope = mergeAudience(kids);
+    if (scope.error) return { ok: false, error: scope.error };
+    return { ok: true, nodes: kids, level: chapter.chronicle.level, inputHash: mergeInputHash(nodes), restricted: scope.audience !== null, audience: scope.audience };
   }
   async function runChronicleMerge(ids, { auto = false, replacesEpisodeId = "" } = {}) {
     const rows = await loadChronicleRows();
@@ -6474,7 +6521,7 @@ When current and historical facts differ, current facts take precedence.`;
     }
     if (!check.ok) throw new Error(check.error);
     if (auto && check.restricted) return null;
-    const pending = pendingMergeIds(chronicle);
+    const pending = pendingMergeIds(chronicle, { includeFailed: auto });
     if (ids.some((id) => pending.has(id))) throw new Error("고른 기록 중 합치기 후보가 이미 검토 대기 중이에요. 그 후보를 먼저 확인해 주세요.");
     if (chronicle.jobs.length) throw new Error("응답을 기다리는(또는 결과 미확정) 요청이 있어요. 보관함을 다시 열어 정리한 뒤 시도해 주세요.");
     const conn = state.chronicleConnections.find((row) => row.id === chronicle.settings.connectionId && row.supported) || state.chronicleConnections.find((row) => row.supported);
@@ -6544,15 +6591,15 @@ When current and historical facts differ, current facts take precedence.`;
     const target = rv.replacesEpisodeId ? list.find((ep) => ep.id === rv.replacesEpisodeId) : null;
     const check = target ? regenerateMergeCheck(target, list, rows) : validateMerge(list, rows, ids);
     if (!check.ok || check.inputHash !== rv.inputHash || (target && ids.join() !== target.chronicle.childRefs.map((ref) => ref.id).join())) {
-      await saveChronicleReview({ ...rv, status: "held", reason: "후보를 만든 뒤 하위 기록이 바뀌었어요. 다시 생성해 주세요." });
+      const reason = !check.ok && check.error ? check.error : "후보를 만든 뒤 하위 기록이 바뀌었어요. 다시 생성해 주세요.";
+      await saveChronicleReview({ ...rv, status: "held", reason });
       render();
-      throw new Error("하위 기록이 바뀌어 저장하지 않았어요. 후보를 보류로 돌렸어요.");
+      throw new Error(!check.ok && check.error ? `${check.error} 후보를 보류로 돌렸어요.` : "하위 기록이 바뀌어 저장하지 않았어요. 후보를 보류로 돌렸어요.");
     }
     if (check.restricted) {
-      // 제한 입력의 합본은 입력들의 아는 인물 교집합보다 넓어질 수 없다. 공개로 바꾸는 것도 막는다.
-      const nodes = target ? check.nodes : check.nodes.map((n) => n.ep || n);
-      const idsOf = (ep) => new Set([...normalizeKnownBy(ep.event.knownBy), ...ep.facts.flatMap((f) => normalizeKnownBy(f.knownBy))]);
-      const allowed = nodes.map(idsOf).reduce((acc, set) => new Set([...acc].filter((id) => set.has(id))));
+      // 제한 입력의 합본은 요청 전체를 읽을 수 있는 인물(각 기록의 사건·사실 범위 교집합, 다시 기록끼리 교집합)보다
+      // 넓어질 수 없다. 결과의 모든 부분(사건·사실)이 그 안에 있어야 하고, 공개로 바꾸는 것도 막는다.
+      const allowed = new Set(check.audience || []);
       const parts = [draft.event.knownBy, ...draft.facts.map((f) => f.knownBy)];
       if (!allowed.size || parts.some((ids2) => !normalizeKnownBy(ids2).length || normalizeKnownBy(ids2).some((id) => !allowed.has(id)))) {
         throw new Error("제한된 기록의 합본은 원래 아는 인물(교집합) 안에서만 저장할 수 있어요. 모든 부분의 아는 인물을 그 범위로 골라 주세요.");
@@ -6622,7 +6669,7 @@ When current and historical facts differ, current facts take precedence.`;
     while (calls < settings.maxCallsPerRun) {
       const rows = await loadChronicleRows();
       const chronicle = chronicleOf();
-      const plan = planAutoMerge(episodeList(), rows, settings, { pendingIds: pendingMergeIds(chronicle), suppressed: chronicle.suppressedMerges, estimate: (ep) => estimateTokens(`${ep.event.summary}\n${ep.facts.map((f) => f.text).join("\n")}`) });
+      const plan = planAutoMerge(episodeList(), rows, settings, { pendingIds: pendingMergeIds(chronicle, { includeFailed: true }), suppressed: chronicle.suppressedMerges, estimate: (ep) => estimateTokens(`${ep.event.summary}\n${ep.facts.map((f) => f.text).join("\n")}`) });
       if (!plan) break;
       calls += 1;
       try { await runChronicleMerge(plan.ids, { auto: true }); }
@@ -6678,7 +6725,8 @@ When current and historical facts differ, current facts take precedence.`;
 
   // ── 주입 미리보기 ──
   const INJECTION_REASON_LABEL = {
-    recent: "상시 · 최근", dependency: "상시 · 의존 기록", older: "키워드", budget: "키워드 · 상시 예산 초과", "dependency-budget": "키워드 · 의존 기록까지는 예산 초과",
+    recent: "상시 · 최근", dependency: "상시 · 의존 기록", older: "키워드", budget: "키워드 · 상시 예산 초과",
+    "dependency-budget": "넣지 않음 · 참고한 기록까지 넣을 예산 부족", "dependency-not-included": "넣지 않음 · 참고한 기록이 이번 요청에 없음", "dependency-unavailable": "넣지 않음 · 참고한 기록이 보류·갱신 필요",
   };
   const GHOST_NOTE = "원문 숨김(ghost)은 지원하지 않아요. SillyTavern은 원문을 고르는 단계(생성 가로채기)를 로어북 선택·예산 판정보다 먼저 실행해서, 요약이 실제로 들어갔는지 확인한 뒤 원문을 뺄 수 없어요. 그래서 원문은 언제나 그대로 보내고 요약은 더해서만 넣어요.";
   function chroniclePreviewLayer() {
@@ -6693,12 +6741,12 @@ When current and historical facts differ, current facts take precedence.`;
       const entry = plan.get(ep.id);
       const label = entry ? INJECTION_REASON_LABEL[entry.reason] || entry.mode : (CHRONICLE_STATE_LABEL[res.state]?.[1] || CHRONICLE_REASON_LABEL[res.reason] || "주입 안 함");
       const actual = scan && entry ? (scan.text.includes(chronicleHead(ep)) ? "실제 포함" : "이번엔 빠짐") : "";
-      return `<div class="mmc-chr-tr is-${entry ? (entry.mode === "constant" ? "approved" : "keyword") : esc(res.state)}" data-chr-preview-id="${esc(ep.id)}"><span class="mmc-chr-range" data-label="범위">${esc(nodeRangeText(ep, res))}</span><span data-label="단계">${episodeMode(ep) === "chapter" ? `장 ${ep.chronicle.level}` : "장면"}</span><span><b>${esc(ep.title)}</b></span><span data-label="방식">${esc(label)}</span><span data-label="추정">${entry ? `${entry.tokens.toLocaleString()} 토큰` : "—"}</span><span data-label="확인" data-chr-actual="${esc(actual)}">${esc(actual || "—")}</span></div>`;
+      return `<div class="mmc-chr-tr is-${entry ? (entry.mode === "constant" ? "approved" : entry.mode === "held" ? "held" : "keyword") : esc(res.state)}" data-chr-preview-id="${esc(ep.id)}"><span class="mmc-chr-range" data-label="범위">${esc(nodeRangeText(ep, res))}</span><span data-label="단계">${episodeMode(ep) === "chapter" ? `장 ${ep.chronicle.level}` : "장면"}</span><span><b>${esc(ep.title)}</b></span><span data-label="방식">${esc(label)}</span><span data-label="추정">${entry ? `${entry.tokens.toLocaleString()} 토큰` : "—"}</span><span data-label="확인" data-chr-actual="${esc(actual)}">${esc(actual || "—")}</span></div>`;
     }).join("");
     return `<div class="mmc-layer-backdrop" data-action="close-layer"><section class="mmc-layer mmc-chronicle-layer" data-layer-stop>
       <header><div><span class="mmc-kicker">SCENE CHRONICLE</span><h3>주입 미리보기</h3><small>구간 연대기에서 이번 생성에 들어갈 후보예요. 토큰은 추정이에요. 실제 포함 여부는 SillyTavern 로어북 예산·키워드에 따라 달라요.</small></div><button class="mmc-icon-btn" data-action="close-layer">${SVG.close}</button></header>
       <div class="mmc-layer-body">
-        <div class="mmc-chr-summary"><b>상시 ${constantTokens.toLocaleString()} / ${cap.toLocaleString()} 토큰</b><small>전체 목표 ${settings.budgetTokens.toLocaleString()} 토큰 중 오래된 상세(키워드)에 ${settings.oldDetailTokens.toLocaleString()} 토큰을 남겨요 · 최근 장면 ${settings.recentScenes}개 · 최근 장 ${settings.recentChapters}개</small><small>키워드 후보 ${[...plan.values()].filter((e) => e.mode === "keyword").length}개 · 모두 걸리면 약 ${keywordTokens.toLocaleString()} 토큰${keywordTokens > settings.oldDetailTokens ? " (목표보다 많아요. 키워드가 동시에 걸리면 로어북 예산에서 일부가 빠질 수 있어요)" : ""}</small><small>약속·앵커 등 다른 기억 층의 예산은 줄이지 않아요. 보관·갱신 필요·보류·삭제된 기록은 넣지 않아요.</small></div>
+        <div class="mmc-chr-summary"><b>상시 ${constantTokens.toLocaleString()} / ${cap.toLocaleString()} 토큰</b><small>전체 목표 ${settings.budgetTokens.toLocaleString()} 토큰 중 오래된 상세(키워드)에 ${settings.oldDetailTokens.toLocaleString()} 토큰을 남겨요 · 최근 장면 ${settings.recentScenes}개 · 최근 장 ${settings.recentChapters}개</small><small>키워드 후보 ${[...plan.values()].filter((e) => e.mode === "keyword").length}개 · 모두 걸리면 약 ${keywordTokens.toLocaleString()} 토큰${keywordTokens > settings.oldDetailTokens ? " (목표보다 많아요. 키워드가 동시에 걸리면 로어북 예산에서 일부가 빠질 수 있어요)" : ""}</small><small>약속·앵커 등 다른 기억 층의 예산은 줄이지 않아요. 보관·갱신 필요·보류·삭제된 기록은 넣지 않아요. 앞 기록을 참고해 쓴 기록은 그 기록들을 모두 함께 넣을 수 있을 때만 넣어요(키워드 단독으로는 넣지 않아요). 목표 토큰은 계획 기준이고 실제 상한은 SillyTavern 로어북 예산이에요.</small></div>
         <div class="mmc-chr-table mmc-chr-preview-table" role="table"><div class="mmc-chr-tr is-head" role="row"><span>범위</span><span>단계</span><span>제목</span><span>방식</span><span>추정</span><span>최근 대화 확인</span></div>${rowsHtml || '<div class="mmc-empty">구간 연대기 기록이 없어요.</div>'}</div>
         ${scan ? `<small class="mmc-chr-cite">최근 메시지 ${scan.count}개로 SillyTavern 로어북 선택을 실제로 돌려 본 결과예요(모델 호출 없음).</small>` : ""}
         <div class="mmc-chr-note">${esc(GHOST_NOTE)}</div>
@@ -8834,7 +8882,7 @@ When current and historical facts differ, current facts take precedence.`;
   }
 
   // 저장·적용 계열은 한 번에 하나만 실행한다. 동기화가 느릴 때 연타로 같은 기록이 두 번 생기지 않게 한다.
-  const LOCKED_ACTIONS = new Set(["chronicle-run", "chronicle-approve", "chronicle-discard", "chronicle-retry", "chronicle-reconfirm", "chronicle-merge-selected", "chronicle-undo-merge", "chronicle-save-settings", "chronicle-restore", "chronicle-purge", "save-thread", "delete-thread", "thread-status", "save-episode", "delete-episode", "stale-ack", "branch-hold-keep", "branch-hold-drop", "save-candidates", "apply-review", "apply-health", "save-element-candidates", "save-draft", "save-element", "delete-item", "delete-element", "promise-status", "toggle-promise-done", "toggle-anchor-active", "anchor-move", "save-settings", "save-element-settings", "import-legacy", "undo-auto-review", "restore-memory-backup", "confirm-quarantined-memory", "wiki-save", "wiki-candidate-save", "wiki-proposal-apply", "wiki-delete", "wiki-save-settings", "wiki-toggle", "parse-raw-recovery"]);
+  const LOCKED_ACTIONS = new Set(["chronicle-run", "chronicle-approve", "chronicle-discard", "chronicle-retry", "chronicle-reconfirm", "chronicle-standalone", "chronicle-merge-selected", "chronicle-undo-merge", "chronicle-save-settings", "chronicle-restore", "chronicle-purge", "save-thread", "delete-thread", "thread-status", "save-episode", "delete-episode", "stale-ack", "branch-hold-keep", "branch-hold-drop", "save-candidates", "apply-review", "apply-health", "save-element-candidates", "save-draft", "save-element", "delete-item", "delete-element", "promise-status", "toggle-promise-done", "toggle-anchor-active", "anchor-move", "save-settings", "save-element-settings", "import-legacy", "undo-auto-review", "restore-memory-backup", "confirm-quarantined-memory", "wiki-save", "wiki-candidate-save", "wiki-proposal-apply", "wiki-delete", "wiki-save-settings", "wiki-toggle", "parse-raw-recovery"]);
   async function handleClick(event) {
     const actionEl = event.target.closest?.("[data-action]");
     if (!actionEl) return;
@@ -9117,6 +9165,7 @@ When current and historical facts differ, current facts take precedence.`;
       if (action === "chronicle-discard") { if (!window.confirm("이 후보를 버릴까요? 저장된 기억에는 영향이 없어요.")) return; await discardChronicleReview(String(actionEl.dataset.id || "")); return; }
       if (action === "chronicle-retry") { if (!window.confirm("이 후보를 버리고 같은 구간으로 새 요청을 준비할까요? 실행 전에 다시 확인해요.")) return; await retryChronicleReview(String(actionEl.dataset.id || "")); return; }
       if (action === "chronicle-reconfirm") { await reconfirmChronicleNode(String(actionEl.dataset.id || "")); return; }
+      if (action === "chronicle-standalone") { await confirmChronicleStandalone(String(actionEl.dataset.id || "")); return; }
       if (action === "chronicle-restore") { await restoreChronicleNode(String(actionEl.dataset.id || "")); return; }
       if (action === "chronicle-purge") { await purgeChronicleNode(String(actionEl.dataset.id || "")); return; }
       if (action === "new-episode") { state.episodeDraft = { title: "" }; state.episodeDraftExtraFacts = 1; state.layer = "episode-editor"; render(); return; }

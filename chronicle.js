@@ -159,6 +159,8 @@ export function normalizeEpisodeChronicle(raw) {
         revision: int(raw.revision, 1, 1e6, 1), contextRefs: normalizeContextRefs(raw.contextRefs), generation: normalizeGeneration(raw.generation),
         approvedAt: str(raw.approvedAt, 40), previous: normalizePrevious(raw.previous),
         archivedBy: str(raw.archivedBy, 120), archivedAt: str(raw.archivedAt, 40),
+        // The user confirmed this revision reads on its own without the records it was written against.
+        standaloneRevision: int(raw.standaloneRevision, 0, 1e6, 0),
         deletedAt: str(raw.deletedAt, 40), statusBeforeDelete: SCENE_STATUSES.includes(raw.statusBeforeDelete) && raw.statusBeforeDelete !== 'deleted' ? raw.statusBeforeDelete : '',
     };
     if (raw.mode === 'chapter') {
@@ -265,12 +267,45 @@ function chronicleNodes(episodes) {
     return map;
 }
 
+const liveStatus = c => !['undone', 'deleted'].includes(c.status);
+// Reasons computed from the stored graph itself. They are never persisted as the
+// record's own status: fixing the graph (e.g. undoing a merge) clears them.
+export const STRUCTURAL_REASONS = Object.freeze(['graph-invalid', 'coverage-invalid', 'coverage-overlap']);
+
 /**
- * Evaluates every chronicle node against the current messages.
- * Returns Map id -> { state, reason, loc, own } where `own` ignores archiving.
+ * Graph integrity of the merge forest: every child of a live chapter must point
+ * back to it (archivedBy), belong to one live chapter only, and every archivedBy
+ * must point to a chapter that lists the node. Offending parents and the records
+ * they claim are held; nothing is deleted or re-activated.
  */
-export function evaluateChronicle(episodes, rows) {
-    const nodes = chronicleNodes(episodes);
+function graphIssues(nodes) {
+    const bad = new Map();
+    const mark = (id, reason = 'graph-invalid') => { if (!bad.has(id)) bad.set(id, reason); };
+    const claims = new Map();
+    for (const [id, { c }] of nodes) {
+        if (c.mode !== 'chapter' || !liveStatus(c)) continue;
+        for (const ref of c.childRefs) claims.set(ref.id, [...(claims.get(ref.id) || []), id]);
+    }
+    for (const [id, { c }] of nodes) {
+        if (c.mode !== 'chapter' || !liveStatus(c)) continue;
+        for (const ref of c.childRefs) {
+            const child = nodes.get(ref.id);
+            if (ref.id === id) { mark(id); continue; }
+            if (child && child.c.archivedBy !== id) { mark(id); mark(ref.id); }
+            if ((claims.get(ref.id) || []).length > 1) claims.get(ref.id).forEach(pid => mark(pid));
+        }
+    }
+    for (const [id, { c }] of nodes) {
+        if (!c.archivedBy) continue;
+        const parent = nodes.get(c.archivedBy);
+        if (!parent) continue; // parent gone (e.g. a branch dropped it): the record is simply active again
+        if (parent.c.mode !== 'chapter') { mark(id); continue; }
+        if (liveStatus(parent.c) && !parent.c.childRefs.some(ref => ref.id === id)) { mark(c.archivedBy); mark(id); }
+    }
+    return bad;
+}
+
+function evaluateOnce(nodes, rows, forced) {
     const memo = new Map();
     const visiting = new Set();
     const own = (id) => {
@@ -284,7 +319,8 @@ export function evaluateChronicle(episodes, rows) {
         if (c.status === 'deleted' || c.status === 'undone') out = { state: c.status, reason: c.invalidReason };
         else if (c.mode === 'range') {
             const loc = c.range?.count ? locateRange(rows, c.range) : { status: 'invalid' };
-            if (c.status === 'held') out = { state: 'held', reason: c.invalidReason || 'held', loc };
+            if (forced.has(id)) out = { state: 'held', reason: forced.get(id), loc };
+            else if (c.status === 'held') out = { state: 'held', reason: c.invalidReason || 'held', loc };
             else if (loc.status === 'changed' || loc.status === 'invalid') out = { state: 'stale', reason: 'source-changed', loc };
             else if (loc.status === 'ambiguous') out = { state: 'held', reason: 'ambiguous', loc };
             else out = { state: c.status === 'stale' ? 'stale' : 'approved', reason: c.status === 'stale' ? c.invalidReason || 'stale' : '', loc };
@@ -292,10 +328,14 @@ export function evaluateChronicle(episodes, rows) {
             const kids = c.childRefs.map(ref => ({ ref, node: nodes.get(ref.id), res: own(ref.id) }));
             const locs = kids.map(k => k.res.loc).filter(Boolean);
             const located = locs.length === kids.length && locs.every(l => l.status === 'exact' || l.status === 'moved' || l.status === 'merged');
+            // Children must tile one gap-free run in order: no gap, no overlap.
+            const contiguous = located && locs.every((l, i) => i === 0 || l.startIndex === locs[i - 1].endIndex + 1);
             const loc = located ? { status: 'merged', startIndex: Math.min(...locs.map(l => l.startIndex)), endIndex: Math.max(...locs.map(l => l.endIndex)) } : { status: 'changed' };
             const childBad = kids.some(k => !k.node || ['stale', 'held', 'deleted', 'undone', 'missing'].includes(k.res.state));
             const childEdited = kids.some(k => k.node && k.node.c.revision !== k.ref.revision);
-            if (c.status === 'held') out = { state: 'held', reason: c.invalidReason || 'held', loc };
+            if (forced.has(id)) out = { state: 'held', reason: forced.get(id), loc };
+            else if (c.status === 'held') out = { state: 'held', reason: c.invalidReason || 'held', loc };
+            else if (located && !contiguous) out = { state: 'held', reason: 'coverage-invalid', loc };
             else if (childBad || childEdited || !located) out = { state: 'stale', reason: 'child-changed', loc };
             else out = { state: c.status === 'stale' ? 'stale' : 'approved', reason: c.status === 'stale' ? c.invalidReason || 'stale' : '', loc };
         }
@@ -316,16 +356,43 @@ export function evaluateChronicle(episodes, rows) {
         const base = own(id);
         let state = base.state;
         // Archived under a live (not undone/deleted) parent: kept, never injected.
-        if (c.archivedBy && nodes.has(c.archivedBy) && !['undone', 'deleted'].includes(nodes.get(c.archivedBy).c.status) && state !== 'deleted') state = 'archived';
+        if (c.archivedBy && nodes.has(c.archivedBy) && liveStatus(nodes.get(c.archivedBy).c) && state !== 'deleted') state = 'archived';
         result.set(id, { ...base, state, own: base.state });
     }
     return result;
 }
 
+/**
+ * Evaluates every chronicle node against the current messages.
+ * Returns Map id -> { state, reason, loc, own } where `own` ignores archiving.
+ * Graph errors (backlinks, two parents, gaps) and message-range overlap between
+ * two injectable records hold the records involved (final duplicate guard).
+ */
+export function evaluateChronicle(episodes, rows) {
+    const nodes = chronicleNodes(episodes);
+    const forced = graphIssues(nodes);
+    for (let round = 0; round <= nodes.size; round++) {
+        const result = evaluateOnce(nodes, rows, forced);
+        const live = [...result].filter(([, r]) => r.state === 'approved' && r.loc && ['exact', 'moved', 'merged'].includes(r.loc.status))
+            .sort((a, b) => a[1].loc.startIndex - b[1].loc.startIndex);
+        let added = false;
+        for (let i = 0; i < live.length; i++) {
+            for (let j = i + 1; j < live.length && live[j][1].loc.startIndex <= live[i][1].loc.endIndex; j++) {
+                for (const id of [live[i][0], live[j][0]]) if (!forced.has(id)) { forced.set(id, 'coverage-overlap'); added = true; }
+            }
+        }
+        if (!added) return result;
+    }
+    return evaluateOnce(nodes, rows, forced);
+}
+
 /** Chronicle node ids that must not be injected now (generation-time guard). */
-export function blockedChronicleIds(episodes, rows) {
+export function blockedChronicleIds(episodes, rows, evaluation = evaluateChronicle(episodes, rows)) {
     const blocked = new Set();
-    for (const [id, res] of evaluateChronicle(episodes, rows)) if (res.state !== 'approved') blocked.add(id);
+    for (const [id, res] of evaluation) if (res.state !== 'approved') blocked.add(id);
+    // A record whose dependency closure is not injectable now is withheld with it.
+    const nodes = chronicleNodes(episodes);
+    for (const [id, res] of evaluation) if (res.state === 'approved' && closureIn(nodes, id, evaluation).missing.length) blocked.add(id);
     return blocked;
 }
 
@@ -366,6 +433,28 @@ export function scopeSignature(ep) {
     const parts = [ids(ep?.event?.knownBy), ...(Array.isArray(ep?.facts) ? ep.facts : []).map(f => ids(f?.knownBy))].filter(list => list.length).map(list => list.join(','));
     return [...new Set(parts)].sort().join('|');
 }
+/**
+ * The one audience allowed to read every part of a record: the intersection of the
+ * event and every fact scope. A public part (no knownBy) does not narrow it.
+ * null = public (everyone); [] = no one can read all of it (cannot be merged).
+ */
+export function sceneAudience(ep) {
+    const ids = (v) => (Array.isArray(v) ? [...new Set(v.map(String).filter(Boolean))].sort() : []);
+    const parts = [ids(ep?.event?.knownBy), ...(Array.isArray(ep?.facts) ? ep.facts : []).map(f => ids(f?.knownBy))].filter(list => list.length);
+    if (!parts.length) return null;
+    return parts.reduce((acc, list) => acc.filter(id => list.includes(id)));
+}
+/** Audience of a merge request over these records, or { error } when they cannot share one. */
+export function mergeAudience(eps) {
+    const audiences = eps.map(sceneAudience);
+    if (audiences.some(a => a && !a.length)) return { error: '사건과 사실의 아는 인물 범위가 서로 겹치지 않는 기록이 있어요(범위를 나눌 수 없음). 그런 기록은 합치지 않아요. 모델을 호출하지 않았어요.' };
+    const restricted = audiences.filter(Boolean);
+    if (restricted.length && restricted.length !== audiences.length) return { error: '공개 기록과 아는 인물 범위가 있는 기록은 함께 합치지 않아요.' };
+    if (!restricted.length) return { audience: null };
+    const audience = restricted.reduce((acc, list) => acc.filter(id => list.includes(id)));
+    if (!audience.length) return { error: '고른 기록들의 아는 인물 범위가 겹치지 않아요(교집합 없음). 합치지 않아요. 모델을 호출하지 않았어요.' };
+    return { audience };
+}
 export function mergeInputHash(nodes) {
     return strongHash(nodes.map(n => `${n.ep.id}@${n.c.revision}`).join(';'));
 }
@@ -383,6 +472,7 @@ export function validateMerge(episodes, rows, ids) {
     if (wanted.size > MAX_MERGE_CHILDREN) return { ok: false, error: `한 번에 ${MAX_MERGE_CHILDREN}개까지 합칠 수 있어요.` };
     if (nodes.length !== wanted.size) return { ok: false, error: '보관된 기록이나 조상·자손이 섞였어요. 활성 구간만 고르세요.' };
     const bad = nodes.find(n => n.res.state !== 'approved');
+    if (bad?.res.reason === 'coverage-overlap') return { ok: false, error: '고른 구간이 서로 겹쳐요(다른 기록과 겹친 구간은 보류돼요).' };
     if (bad) return { ok: false, error: `'${bad.ep.title}'은 갱신이 필요하거나 보류된 기록이에요. 먼저 고친 뒤 합쳐 주세요.` };
     for (let i = 1; i < nodes.length; i++) {
         const prev = nodes[i - 1].res.loc, cur = nodes[i].res.loc;
@@ -391,8 +481,11 @@ export function validateMerge(episodes, rows, ids) {
     }
     const scopes = new Set(nodes.map(n => scopeSignature(n.ep)));
     if (scopes.size > 1) return { ok: false, error: '아는 인물 범위가 다른 기록은 함께 합치지 않아요.' };
+    // Same list-set signature is not enough: the whole request must be readable by one audience.
+    const scope = mergeAudience(nodes.map(n => n.ep));
+    if (scope.error) return { ok: false, error: scope.error };
     const level = 1 + Math.max(...nodes.map(n => (n.c.mode === 'chapter' ? n.c.level : 0)));
-    return { ok: true, nodes, level, restricted: [...scopes][0] !== '', inputHash: mergeInputHash(nodes),
+    return { ok: true, nodes, level, restricted: scope.audience !== null, audience: scope.audience, inputHash: mergeInputHash(nodes),
         coverage: { startIndex: nodes[0].res.loc.startIndex, endIndex: nodes[nodes.length - 1].res.loc.endIndex } };
 }
 
@@ -504,7 +597,9 @@ export function planAutoScene(episodes, rows, settings, evaluation = evaluateChr
 // ── Injection plan (phase G) ──
 /** The active (non-archived) node standing for `id`: itself, or its live merged ancestor. */
 export function activeRepresentative(episodes, id, evaluation) {
-    const nodes = chronicleNodes(episodes);
+    return representativeIn(chronicleNodes(episodes), id, evaluation);
+}
+function representativeIn(nodes, id, evaluation) {
     let cur = id;
     const seen = new Set();
     while (cur && !seen.has(cur)) {
@@ -517,18 +612,101 @@ export function activeRepresentative(episodes, id, evaluation) {
     return '';
 }
 
+/** True when this exact revision was confirmed by the user to read on its own. */
+export function isStandalone(c) { return !!c && c.standaloneRevision > 0 && c.standaloneRevision === c.revision; }
+
+/**
+ * Context references a node relies on: its own and those of its archived
+ * descendants (a chapter was written from them), minus references that stay
+ * inside the node. A standalone-confirmed record contributes none.
+ */
+function externalRefs(nodes, id) {
+    const inside = new Set();
+    const walk = (nid, depth) => {
+        const n = nodes.get(nid);
+        if (!n || inside.has(nid) || depth > 64) return;
+        inside.add(nid);
+        if (n.c.mode === 'chapter') n.c.childRefs.forEach(r => walk(r.id, depth + 1));
+    };
+    walk(id, 0);
+    const refs = [];
+    for (const nid of inside) {
+        const n = nodes.get(nid);
+        if (isStandalone(n.c)) continue;
+        for (const ref of n.c.contextRefs) if (!inside.has(ref.id)) refs.push(ref.id);
+    }
+    return [...new Set(refs)];
+}
+
+/**
+ * Transitive dependency closure of a record via live representatives
+ * (an archived reference is served by its live merged ancestor, whose own
+ * dependencies are followed too). `missing` lists references with no
+ * injectable representative. `direct` maps each member to its direct deps.
+ */
+export function dependencyClosure(episodes, id, evaluation) {
+    return closureIn(chronicleNodes(episodes), id, evaluation);
+}
+function closureIn(nodes, id, evaluation) {
+    const deps = new Set();
+    const missing = [];
+    const direct = new Map();
+    const queue = [id];
+    const seen = new Set([id]);
+    while (queue.length) {
+        const cur = queue.shift();
+        const reps = [];
+        for (const ref of externalRefs(nodes, cur)) {
+            const rep = representativeIn(nodes, ref, evaluation);
+            if (!rep || evaluation.get(rep)?.state !== 'approved') { missing.push(ref); continue; }
+            if (rep === id || rep === cur) continue;
+            reps.push(rep);
+            if (!seen.has(rep)) { seen.add(rep); deps.add(rep); queue.push(rep); }
+        }
+        direct.set(cur, [...new Set(reps)]);
+    }
+    return { deps, missing: [...new Set(missing)], direct };
+}
+
+/** Records needing other records in the same request: id -> Set of dependency ids. */
+export function injectionDependencies(episodes, rows, evaluation = evaluateChronicle(episodes, rows)) {
+    const out = new Map();
+    const nodes = chronicleNodes(episodes);
+    for (const [id, res] of evaluation) {
+        if (res.state !== 'approved') continue;
+        const { deps } = closureIn(nodes, id, evaluation);
+        if (deps.size) out.set(id, deps);
+    }
+    return out;
+}
+
+/** Without current messages: does this record (or its subtree) rely on other records at all? */
+export function hasDependencies(episodes, id) {
+    return externalRefs(chronicleNodes(episodes), id).length > 0;
+}
+
 /**
  * Decides how each valid frontier record is injected.
  * - constant: the newest N range scenes and J chapters, newest first, within
- *   (budgetTokens - oldDetailTokens). A constant delta pulls in the records it
- *   was written against (dependency closure, via their live representative);
- *   if those do not fit, the delta itself falls back to keyword-only.
- * - keyword: every other valid record (older detail; native WI budget applies).
+ *   (budgetTokens - oldDetailTokens), together with their full transitive
+ *   dependency closure. If the closure does not fit, the record is held.
+ * - keyword: older records that rely on no other record (or were confirmed
+ *   standalone). A record with dependencies is never keyword-only: the native
+ *   keyword scan could fire it without them.
+ * - held: dependencies not included in this request, or not injectable.
+ * `depth` orders WI entries so every dependency sorts ahead of its dependents.
  * Archived, stale, held, deleted and undone records are not injected at all.
  */
 export function planChronicleInjection(episodes, rows, settings, tokensOf, evaluation = evaluateChronicle(episodes, rows)) {
     const frontier = chronicleFrontier(episodes, rows, evaluation).filter(n => n.res.state === 'approved');
-    const plan = new Map(frontier.map(n => [n.id, { mode: 'keyword', reason: 'older', tokens: tokensOf(n.ep) }]));
+    const nodes = chronicleNodes(episodes);
+    const closures = new Map(frontier.map(n => [n.id, closureIn(nodes, n.id, evaluation)]));
+    const plan = new Map(frontier.map(n => {
+        const cl = closures.get(n.id);
+        const base = { tokens: tokensOf(n.ep), depth: 0 };
+        if (cl.missing.length) return [n.id, { ...base, mode: 'held', reason: 'dependency-unavailable' }];
+        return [n.id, { ...base, ...(cl.deps.size ? { mode: 'held', reason: 'dependency-not-included' } : { mode: 'keyword', reason: 'older' }) }];
+    }));
     const newest = frontier.slice().sort((a, b) => (b.res.loc?.endIndex ?? -1) - (a.res.loc?.endIndex ?? -1));
     const recent = [
         ...newest.filter(n => n.c.mode === 'range').slice(0, settings.recentScenes),
@@ -536,17 +714,34 @@ export function planChronicleInjection(episodes, rows, settings, tokensOf, evalu
     ].sort((a, b) => (b.res.loc?.endIndex ?? -1) - (a.res.loc?.endIndex ?? -1));
     const cap = Math.max(0, settings.budgetTokens - settings.oldDetailTokens);
     let used = 0;
-    const byId = new Map(frontier.map(n => [n.id, n]));
     for (const node of recent) {
         const entry = plan.get(node.id);
-        if (entry.mode === 'constant') continue;
-        const deps = [...new Set(node.c.contextRefs.map(ref => activeRepresentative(episodes, ref.id, evaluation)).filter(id => id && id !== node.id && byId.has(id)))]
-            .filter(id => plan.get(id).mode !== 'constant');
+        const cl = closures.get(node.id);
+        if (entry.mode === 'constant' || cl.missing.length) continue;
+        const deps = [...cl.deps].filter(id => plan.has(id) && plan.get(id).mode !== 'constant');
+        if ([...cl.deps].some(id => !plan.has(id))) { Object.assign(entry, { mode: 'held', reason: 'dependency-unavailable' }); continue; }
         const cost = entry.tokens + deps.reduce((sum, id) => sum + plan.get(id).tokens, 0);
-        if (used + cost > cap) { entry.reason = deps.length && used + entry.tokens <= cap ? 'dependency-budget' : 'budget'; continue; }
+        if (used + cost > cap) {
+            if (cl.deps.size) Object.assign(entry, { mode: 'held', reason: 'dependency-budget' });
+            else entry.reason = 'budget';
+            continue;
+        }
         used += cost;
-        entry.mode = 'constant'; entry.reason = 'recent';
+        Object.assign(entry, { mode: 'constant', reason: 'recent' });
         for (const id of deps) Object.assign(plan.get(id), { mode: 'constant', reason: 'dependency' });
     }
+    // Depth = longest dependency path below a record; dependencies get lower depth.
+    const depthMemo = new Map();
+    const depthOf = (id, trail = new Set()) => {
+        if (depthMemo.has(id)) return depthMemo.get(id);
+        if (trail.has(id)) return 0;
+        trail.add(id);
+        const direct = closures.get(id)?.direct.get(id) || [];
+        const d = direct.length ? 1 + Math.max(...direct.map(dep => depthOf(dep, trail))) : 0;
+        trail.delete(id);
+        depthMemo.set(id, d);
+        return d;
+    };
+    for (const [id, entry] of plan) entry.depth = entry.mode === 'constant' ? depthOf(id) : 0;
     return { plan, constantTokens: used, cap, keywordTokens: [...plan.values()].filter(e => e.mode === 'keyword').reduce((s, e) => s + e.tokens, 0) };
 }

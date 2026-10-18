@@ -521,18 +521,20 @@ test('a timed-out model request blocks duplicates until it settles and never ret
 test('generation-time guard drops chronicle scenes whose source changed even before re-sync', async () => {
     const { buildRange, stMessageRow } = await import('../chronicle.js');
     const f = fixture();
-    f.ctx.chat = [{ is_user: true, name: 'U', mes: 'one', send_date: 'a' }, { is_user: false, name: 'M', mes: 'two', send_date: 'b' }];
+    f.ctx.chat = [{ is_user: true, name: 'U', mes: 'one', send_date: 'a' }, { is_user: false, name: 'M', mes: 'two', send_date: 'b' },
+        { is_user: true, name: 'U', mes: 'three', send_date: 'c' }, { is_user: false, name: 'M', mes: 'four', send_date: 'd' }];
     await f.host.beginSync(f.id);
     const book = await f.host.api('lorebooks', { method: 'POST', body: { chatId: f.id, name: 'Vault', scanDepth: 4 } });
-    for (const id of ['ep-a', 'ep-b']) await f.host.api(`lorebooks/${book.id}/entries`, { method: 'POST', body: {
-        content: `scene ${id}`, tag: 'memory-cabinet-episode', keys: ['key'], enabled: true, dynamicState: { memoryCabinetEpisodeId: id },
+    // ep-b was written against ep-a: both constant, ep-a ordered first (as the extension syncs them).
+    for (const [id, order] of [['ep-a', 48], ['ep-b', 49]]) await f.host.api(`lorebooks/${book.id}/entries`, { method: 'POST', body: {
+        content: `scene ${id}`, tag: 'memory-cabinet-episode', keys: ['key'], constant: true, order, enabled: true, dynamicState: { memoryCabinetEpisodeId: id },
     } });
     await f.host.commitSync(f.id);
     f.host.endSync();
-    const range = buildRange(f.ctx.chat.map(stMessageRow), 0, 1);
+    const rows = f.ctx.chat.map(stMessageRow);
     const episodes = [
-        { id: 'ep-a', title: 'A', chronicle: { mode: 'range', status: 'approved', revision: 1, range } },
-        { id: 'ep-b', title: 'B', chronicle: { mode: 'range', status: 'approved', revision: 1, range, contextRefs: [{ id: 'ep-a', revision: 1 }] } },
+        { id: 'ep-a', title: 'A', chronicle: { mode: 'range', status: 'approved', revision: 1, range: buildRange(rows, 0, 1) } },
+        { id: 'ep-b', title: 'B', chronicle: { mode: 'range', status: 'approved', revision: 1, range: buildRange(rows, 2, 3), contextRefs: [{ id: 'ep-a', revision: 1 }] } },
     ];
     await f.host.api(`chats/${encodeURIComponent(f.id)}/metadata`, { method: 'PATCH', body: { memoryCabinetV1: { ownerChatId: f.id, lorebookId: book.id, items: [], episodes } } });
     const lists = { chatLore: [], globalLore: [] };
@@ -541,4 +543,37 @@ test('generation-time guard drops chronicle scenes whose source changed even bef
     f.ctx.chat[1].mes = 'edited';
     await f.host.inject(lists);
     assert.deepEqual(lists.chatLore, [], 'edited source and its dependent delta are both withheld');
+});
+
+test('generation-time guard holds a dependent whose dependency is not guaranteed ahead of it in this request', async () => {
+    const { buildRange, stMessageRow } = await import('../chronicle.js');
+    const f = fixture();
+    f.ctx.chat = Array.from({ length: 6 }, (_, i) => ({ is_user: i % 2 === 0, name: i % 2 ? 'M' : 'U', mes: `line ${i}`, send_date: `t${i}` }));
+    const rows = f.ctx.chat.map(stMessageRow);
+    const episodes = [
+        { id: 'A', title: 'A', chronicle: { mode: 'range', status: 'approved', revision: 1, range: buildRange(rows, 0, 1) } },
+        { id: 'B', title: 'B', chronicle: { mode: 'range', status: 'approved', revision: 1, range: buildRange(rows, 2, 3), contextRefs: [{ id: 'A', revision: 1 }] } },
+        { id: 'C', title: 'C', chronicle: { mode: 'range', status: 'approved', revision: 1, range: buildRange(rows, 4, 5), contextRefs: [{ id: 'B', revision: 1 }] } },
+    ];
+    await f.host.beginSync(f.id);
+    const book = await f.host.api('lorebooks', { method: 'POST', body: { chatId: f.id, name: 'Vault', scanDepth: 4 } });
+    const ids = {};
+    for (const id of ['A', 'B', 'C']) ids[id] = (await f.host.api(`lorebooks/${book.id}/entries`, { method: 'POST', body: {
+        content: `scene ${id}`, tag: 'memory-cabinet-episode', keys: [`kw-${id}`], constant: true, order: 48, enabled: true, dynamicState: { memoryCabinetEpisodeId: id, memoryCabinetScope: 'main' },
+    } })).id;
+    await f.host.commitSync(f.id);
+    f.host.endSync();
+    await f.host.api(`chats/${encodeURIComponent(f.id)}/metadata`, { method: 'PATCH', body: { memoryCabinetV1: { ownerChatId: f.id, lorebookId: book.id, items: [], episodes } } });
+    const run = async (spec) => {
+        await f.host.beginSync(f.id);
+        for (const [id, [constant, order]] of Object.entries(spec)) await f.host.api(`lorebooks/${book.id}/entries/${ids[id]}`, { method: 'PATCH', body: { constant, order } });
+        await f.host.commitSync(f.id);
+        f.host.endSync();
+        const lists = { chatLore: [], globalLore: [] };
+        await f.host.inject(lists);
+        return lists.chatLore.map(e => e.content).sort();
+    };
+    assert.deepEqual(await run({ A: [true, 48], B: [true, 49], C: [true, 50] }), ['scene A', 'scene B', 'scene C']);
+    assert.deepEqual(await run({ A: [false, 47], B: [true, 49], C: [true, 50] }), ['scene A'], 'A keyword-only: B and C are held, not sent partially');
+    assert.deepEqual(await run({ A: [true, 48], B: [true, 51], C: [true, 50] }), ['scene A', 'scene B'], 'C ordered ahead of its dependency B is held; B itself is fine');
 });

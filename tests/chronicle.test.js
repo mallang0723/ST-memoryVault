@@ -118,7 +118,9 @@ test('held and imported range scenes are never injected; approved and legacy one
     const range = buildRange(rows(8), 0, 7);
     const chat = { id: 'c', name: 'FILE', metadata: {} };
     const data = c.normalizeData({ items: [], episodes: [
-        rangeScene(range, { id: 'ok', keywords: ['열쇠'] }),
+        rangeScene(range, { id: 'ok', keywords: ['열쇠'], chronicle: { ...rangeScene(range).chronicle, contextRefs: [] } }),
+        // Written against another record: without the current messages its dependencies cannot be checked, so it is not planned.
+        rangeScene(range, { id: 'dependent', keywords: ['문'] }),
         rangeScene(range, { id: 'held', keywords: ['창고'], chronicle: { ...rangeScene(range).chronicle, status: 'held' } }),
         rangeScene(range, { id: 'stale', keywords: ['지하'], chronicle: { ...rangeScene(range).chronicle, status: 'stale' } }),
         { id: 'legacy', title: '옛 장면', keywords: ['우산'], event: { summary: '우산을 빌렸다' } },
