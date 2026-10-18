@@ -314,3 +314,86 @@ test('C4: the standalone confirmation is a user action on this revision only', a
     assert.equal(b.chronicle.standaloneRevision, 1);
     assert.deepEqual(c.episodeEntryPlans({ id: 'chat', metadata: {} }, c.state.currentData).map(p => p.episodeId).sort(), ['A', 'B'], 'B may now go in by keyword; C still needs B in the same request');
 });
+
+// ── C5: dangling archive references vs. explicit detach ──
+test('C5 counterexample: an archivedBy naming a missing parent is held, not restored as approved', async () => {
+    const orphan = scene('orphan', 0, 1, { archivedBy: 'missing-parent', archivedAt: 'then' });
+    const res = evaluateChronicle([orphan], rows).get('orphan');
+    assert.equal(res.own, 'held');
+    assert.equal(res.state, 'held');
+    assert.equal(res.reason, 'graph-invalid');
+    assert.deepEqual([...blockedChronicleIds([orphan], rows)], ['orphan']);
+    const plan = planChronicleInjection([orphan], rows, normalizeSettings({}), () => 10).plan;
+    assert.notEqual(plan.get('orphan')?.mode, 'constant');
+    assert.notEqual(plan.get('orphan')?.mode, 'keyword');
+    // load/import -> source check -> final injection: the re-check refuses and nothing is injected.
+    const imported = scene('orphan', 0, 1, { archivedBy: 'missing-parent', status: 'held', invalidReason: 'imported' });
+    const { c } = harness({ episodes: [imported] });
+    await assert.rejects(c.reconfirmChronicleNode('orphan'), /연결|구조/);
+    assert.equal(evaluateChronicle(c.state.currentData.episodes, rows).get('orphan').state, 'held');
+    assert.deepEqual(c.episodeEntryPlans({ id: 'chat', metadata: {} }, c.state.currentData).map(p => p.episodeId), []);
+    const { c: c2 } = harness({ episodes: [scene('orphan', 0, 1, { archivedBy: 'missing-parent' })] });
+    assert.deepEqual(c2.episodeEntryPlans({ id: 'chat', metadata: {} }, c2.state.currentData).map(p => p.episodeId), []);
+});
+
+test('C5: a chapter whose own archive parent is missing is held and its children stay archived', () => {
+    const X = scene('X', 0, 1), Y = scene('Y', 2, 3);
+    const eps = [X, Y];
+    applyMerge(eps, chapter('P', [X, Y], { archivedBy: 'gone' }), ['X', 'Y'], 'now');
+    assert.deepEqual(states(eps), { X: 'archived', Y: 'archived', P: 'held' });
+    assert.deepEqual([...blockedChronicleIds(eps, rows)].sort(), ['P', 'X', 'Y']);
+});
+
+const old = '2026-01-01T00:00:00Z';
+const branchCut = { at: '2026-06-01T00:00:00Z', messageId: 'st-message:14' };
+function branchedTree() {
+    const X = scene('X', 0, 1), Y = scene('Y', 2, 3);
+    const eps = [X, Y].map(ep => Object.assign(ep, { createdAt: old, updatedAt: old }));
+    applyMerge(eps, Object.assign(chapter('P', [X, Y]), { createdAt: '2026-07-01T00:00:00Z', updatedAt: '2026-07-01T00:00:00Z' }), ['X', 'Y'], old);
+    return eps;
+}
+
+test('C5: a branch that holds a chapter detaches its children explicitly; restoring it re-links them', () => {
+    const c = core(['holdPostBranchRecords', 'restoreHeldRecord', 'normalizeData']);
+    const stray = Object.assign(scene('S', 6, 7, { archivedBy: 'ghost' }), { createdAt: old, updatedAt: old });
+    const data = c.holdPostBranchRecords({ items: [], episodes: [...branchedTree(), stray] }, branchCut, 'parent');
+    assert.deepEqual(data.branchHold.episodes.map(e => e.id), ['P']);
+    const byId = Object.fromEntries(data.episodes.map(e => [e.id, e.chronicle]));
+    assert.equal(byId.X.archivedBy, ''); assert.equal(byId.X.detachedFrom, 'P');
+    assert.equal(byId.Y.archivedBy, ''); assert.equal(byId.Y.detachedFrom, 'P');
+    assert.equal(byId.S.archivedBy, 'ghost', 'a parent not moved by this branch is not an explicit detach');
+    assert.deepEqual(states(data.episodes), { X: 'approved', Y: 'approved', S: 'held' });
+    assert.equal(reasons(data.episodes).S, 'graph-invalid');
+    assert.ok(c.restoreHeldRecord(data, 'episodes', data.branchHold.episodes[0]));
+    const after = Object.fromEntries(data.episodes.map(e => [e.id, e.chronicle]));
+    assert.equal(after.X.archivedBy, 'P'); assert.equal(after.X.detachedFrom, '');
+    assert.deepEqual(states(data.episodes), { X: 'archived', Y: 'archived', S: 'held', P: 'approved' });
+});
+
+test('C5: restoring held records one by one keeps the tree consistent in either order', () => {
+    const c = core(['holdPostBranchRecords', 'restoreHeldRecord', 'normalizeData']);
+    const data = c.holdPostBranchRecords({ items: [], episodes: branchedTree() }, null, 'parent');
+    assert.deepEqual(data.episodes, []);
+    const held = data.branchHold.episodes;
+    const childFirst = c.normalizeData({ items: [], episodes: [] });
+    for (const id of ['X', 'P', 'Y']) assert.ok(c.restoreHeldRecord(childFirst, 'episodes', held.find(e => e.id === id)));
+    assert.deepEqual(states(childFirst.episodes), { X: 'archived', P: 'approved', Y: 'archived' });
+    const onlyChild = c.normalizeData({ items: [], episodes: [] });
+    assert.ok(c.restoreHeldRecord(onlyChild, 'episodes', held.find(e => e.id === 'X')));
+    assert.deepEqual(states(onlyChild.episodes), { X: 'approved' }, 'its chapter stays out of this branch: explicitly detached');
+});
+
+test('a chapter confirmed standalone no longer inherits its archived descendants\' external references', () => {
+    const [A, B, C] = chain();
+    const eps = [A, B, C];
+    applyMerge(eps, chapter('P', [B, C]), ['B', 'C'], 'now');
+    const settings = normalizeSettings({ recentScenes: 0, recentChapters: 1, budgetTokens: 850, oldDetailTokens: 700 });
+    assert.equal(planChronicleInjection(eps, rows, settings, () => 100).plan.get('P').mode, 'held');
+    eps.at(-1).chronicle.standaloneRevision = 1;
+    const evaluation = evaluateChronicle(eps, rows);
+    assert.equal(chronicleLib.dependencyClosure(eps, 'P', evaluation).deps.has('A'), false);
+    assert.equal(chronicleLib.hasDependencies(eps, 'P'), false);
+    assert.notEqual(planChronicleInjection(eps, rows, settings, () => 100).plan.get('P').mode, 'held');
+    eps.at(-1).chronicle.revision = 2;
+    assert.equal(chronicleLib.hasDependencies(eps, 'P'), true, 'only the confirmed revision');
+});

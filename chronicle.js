@@ -159,6 +159,8 @@ export function normalizeEpisodeChronicle(raw) {
         revision: int(raw.revision, 1, 1e6, 1), contextRefs: normalizeContextRefs(raw.contextRefs), generation: normalizeGeneration(raw.generation),
         approvedAt: str(raw.approvedAt, 40), previous: normalizePrevious(raw.previous),
         archivedBy: str(raw.archivedBy, 120), archivedAt: str(raw.archivedAt, 40),
+        // Set only by an explicit detach (branch hold moved the chapter away): lets that chapter re-link on restore.
+        detachedFrom: str(raw.detachedFrom, 120),
         // The user confirmed this revision reads on its own without the records it was written against.
         standaloneRevision: int(raw.standaloneRevision, 0, 1e6, 0),
         deletedAt: str(raw.deletedAt, 40), statusBeforeDelete: SCENE_STATUSES.includes(raw.statusBeforeDelete) && raw.statusBeforeDelete !== 'deleted' ? raw.statusBeforeDelete : '',
@@ -275,8 +277,10 @@ export const STRUCTURAL_REASONS = Object.freeze(['graph-invalid', 'coverage-inva
 /**
  * Graph integrity of the merge forest: every child of a live chapter must point
  * back to it (archivedBy), belong to one live chapter only, and every archivedBy
- * must point to a chapter that lists the node. Offending parents and the records
- * they claim are held; nothing is deleted or re-activated.
+ * must point to an existing chapter that lists the node. Offending parents and the
+ * records they claim are held; nothing is deleted or re-activated. A record whose
+ * archivedBy names a missing parent is corrupted, not released: the only legitimate
+ * way out of a chapter is an explicit detach (undoMerge, detachMissingArchiveParents).
  */
 function graphIssues(nodes) {
     const bad = new Map();
@@ -298,7 +302,7 @@ function graphIssues(nodes) {
     for (const [id, { c }] of nodes) {
         if (!c.archivedBy) continue;
         const parent = nodes.get(c.archivedBy);
-        if (!parent) continue; // parent gone (e.g. a branch dropped it): the record is simply active again
+        if (!parent) { mark(id); continue; } // dangling archive reference: hold, never silently re-activate
         if (parent.c.mode !== 'chapter') { mark(id); continue; }
         if (liveStatus(parent.c) && !parent.c.childRefs.some(ref => ref.id === id)) { mark(c.archivedBy); mark(id); }
     }
@@ -523,10 +527,47 @@ export function applyMerge(episodes, parent, childIds, now) {
     for (const ep of episodes) {
         if (!ids.has(ep.id)) continue;
         if (ep.chronicle?.archivedBy) throw new Error('이미 다른 합본에 들어간 기록이 있어요.');
-        ep.chronicle = { ...ep.chronicle, archivedBy: parent.id, archivedAt: now };
+        ep.chronicle = { ...ep.chronicle, archivedBy: parent.id, archivedAt: now, detachedFrom: '' };
     }
     episodes.push(parent);
     return episodes;
+}
+
+/**
+ * Explicit detach for records whose chapter was moved out of this list on purpose
+ * (branch hold). Only parents named in `removedIds` are detached; any other missing
+ * parent stays a dangling reference and is held by the graph check.
+ * Returns the detached record ids.
+ */
+export function detachMissingArchiveParents(episodes, removedIds) {
+    const removed = new Set([...(removedIds || [])].map(String));
+    const present = new Set((Array.isArray(episodes) ? episodes : []).filter(rec).map(ep => String(ep.id)));
+    const out = [];
+    for (const ep of Array.isArray(episodes) ? episodes : []) {
+        const parentId = rec(ep) && rec(ep.chronicle) ? String(ep.chronicle.archivedBy || '') : '';
+        if (!parentId || present.has(parentId) || !removed.has(parentId)) continue;
+        ep.chronicle = { ...ep.chronicle, archivedBy: '', archivedAt: '', detachedFrom: parentId };
+        out.push(String(ep.id));
+    }
+    return out;
+}
+
+/**
+ * When a detached chapter comes back, its listed children that were detached
+ * from it (and joined nothing else since) are archived under it again.
+ */
+export function reattachDetachedChildren(episodes, chapterId, now) {
+    const list = (Array.isArray(episodes) ? episodes : []).filter(rec);
+    const chapter = list.find(ep => String(ep.id) === String(chapterId));
+    if (!chapter || chapter.chronicle?.mode !== 'chapter') return [];
+    const out = [];
+    for (const ref of chapter.chronicle.childRefs || []) {
+        const child = list.find(ep => String(ep.id) === String(ref.id));
+        if (!child || !rec(child.chronicle) || child.chronicle.archivedBy || child.chronicle.detachedFrom !== String(chapterId)) continue;
+        child.chronicle = { ...child.chronicle, archivedBy: String(chapterId), archivedAt: now, detachedFrom: '' };
+        out.push(String(child.id));
+    }
+    return out;
 }
 
 /**
@@ -618,21 +659,25 @@ export function isStandalone(c) { return !!c && c.standaloneRevision > 0 && c.st
 /**
  * Context references a node relies on: its own and those of its archived
  * descendants (a chapter was written from them), minus references that stay
- * inside the node. A standalone-confirmed record contributes none.
+ * inside the node. A standalone-confirmed record contributes none, and neither
+ * does anything below it (confirming a chapter covers the subtree it was written from).
  */
 function externalRefs(nodes, id) {
     const inside = new Set();
-    const walk = (nid, depth) => {
+    const covered = new Set();
+    const walk = (nid, depth, cut) => {
         const n = nodes.get(nid);
         if (!n || inside.has(nid) || depth > 64) return;
         inside.add(nid);
-        if (n.c.mode === 'chapter') n.c.childRefs.forEach(r => walk(r.id, depth + 1));
+        const here = cut || isStandalone(n.c);
+        if (here) covered.add(nid);
+        if (n.c.mode === 'chapter') n.c.childRefs.forEach(r => walk(r.id, depth + 1, here));
     };
-    walk(id, 0);
+    walk(id, 0, false);
     const refs = [];
     for (const nid of inside) {
+        if (covered.has(nid)) continue;
         const n = nodes.get(nid);
-        if (isStandalone(n.c)) continue;
         for (const ref of n.c.contextRefs) if (!inside.has(ref.id)) refs.push(ref.id);
     }
     return [...new Set(refs)];

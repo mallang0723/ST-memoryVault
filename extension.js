@@ -10,6 +10,7 @@ export function mountMemoryVault(host) {
     buildRange, locateRange, rangesOverlap, completedResponses, normalizeReview, strongHash,
     evaluateChronicle, chronicleFrontier, rowHiddenFrom, assertReviewRoom, MAX_REVIEWS, planAutoScene, planChronicleInjection, validateMerge, planAutoMerge, applyMerge, undoMerge, mergeInputHash, scopeSignature,
     normalizeSettings, MERGE_PROMPT_VERSION, mergeAudience, STRUCTURAL_REASONS, isStandalone, hasDependencies, dependencyClosure,
+    detachMissingArchiveParents, reattachDetachedChildren,
     RANGE_SUMMARY_MAX, SCENE_PROMPT_VERSION,
   } = chronicleLib;
 
@@ -7195,6 +7196,9 @@ When current and historical facts differ, current facts take precedence.`;
         hold.episodes.push({ ...ep, holdReason: reason });
         return false;
       });
+      // 분기 확인 대기로 옮긴 합본의 하위 기록은 명시적으로 분리한다(그 합본을 되돌리면 다시 묶인다).
+      // 이 경로 밖에서 부모가 없는 보관 기록은 손상으로 보고 보류한다.
+      detachMissingArchiveParents(next.episodes, hold.episodes.map((ep) => ep.id));
     }
     if (Array.isArray(next.threads) && typeof normalizeThread === "function") {
       const rawThreads = new Map(safeArray(raw.threads).filter(isRecord).map((row) => [String(row.id || ""), row]));
@@ -7226,7 +7230,10 @@ When current and historical facts differ, current facts take precedence.`;
     if (key === "episodes") {
       const list = safeArray(data.episodes).map(normalizeEpisode).filter(Boolean);
       if (!list.some((ep) => ep.id === clean.id)) list.push(normalizeEpisode(clean));
-      data.episodes = list; return true;
+      // 아직 대기 중인 합본에 묶여 있던 기록은 분리해 되돌리고, 되돌아온 합본은 분리됐던 하위 기록을 다시 묶는다.
+      detachMissingArchiveParents(list, [clean.chronicle?.archivedBy].filter(Boolean));
+      reattachDetachedChildren(list, clean.id, nowIso());
+      data.episodes = list.map(normalizeEpisode).filter(Boolean); return true;
     }
     if (key === "threads" && typeof normalizeThread === "function") {
       const list = safeArray(data.threads).map(normalizeThread).filter(Boolean);
